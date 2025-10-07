@@ -45,6 +45,13 @@ void test_latency(volatile struct shared_data *shm, int iterations)
     printf("\n=== Latency Test (Round-Trip) ===\n");
     printf("Sending %d messages and measuring round-trip time...\n", iterations);
     
+    // Allocate array to store all latency measurements
+    uint64_t *latencies = malloc(iterations * sizeof(uint64_t));
+    if (!latencies) {
+        perror("Failed to allocate latency array");
+        return;
+    }
+    
     uint64_t total_latency = 0;
     int successful = 0;
     uint64_t min_latency = UINT64_MAX;
@@ -77,6 +84,7 @@ void test_latency(volatile struct shared_data *shm, int iterations)
         
         if (shm->guest_ack == 1) {
             uint64_t latency = end_time - start_time;
+            latencies[successful] = latency;  // Store measurement
             total_latency += latency;
             successful++;
             
@@ -106,9 +114,24 @@ void test_latency(volatile struct shared_data *shm, int iterations)
         printf("  Estimated one-way: ~%lu ns (%.2f µs)\n", 
                (total_latency / successful) / 2,
                ((total_latency / successful) / 2) / 1000.0);
+        
+        // Export to CSV
+        FILE *csv = fopen("latency_results.csv", "w");
+        if (csv) {
+            fprintf(csv, "iteration,latency_ns,latency_us\n");
+            for (int i = 0; i < successful; i++) {
+                fprintf(csv, "%d,%lu,%.3f\n", i, latencies[i], latencies[i] / 1000.0);
+            }
+            fclose(csv);
+            printf("\n  ✓ Latency data exported to latency_results.csv\n");
+        } else {
+            perror("Failed to create CSV file");
+        }
     } else {
         printf("\nNo successful measurements. Is the guest program running?\n");
     }
+    
+    free(latencies);
 }
 
 void test_bandwidth(volatile struct shared_data *shm)
@@ -163,6 +186,20 @@ void test_bandwidth(volatile struct shared_data *shm)
     printf("  Bandwidth: %.2f MB/s (%.2f GB/s)\n", 
            bandwidth_mbps, bandwidth_gbps);
     printf("  Theoretical max (DDR4-3200): ~25 GB/s\n");
+    
+    // Export to CSV
+    FILE *csv = fopen("bandwidth_results.csv", "w");
+    if (csv) {
+        fprintf(csv, "test_size_bytes,test_size_mb,duration_ns,duration_ms,bandwidth_mbps,bandwidth_gbps\n");
+        fprintf(csv, "%zu,%.2f,%lu,%.2f,%.2f,%.2f\n", 
+                test_size, test_size / (1024.0 * 1024.0),
+                duration_ns, duration_ns / 1000000.0,
+                bandwidth_mbps, bandwidth_gbps);
+        fclose(csv);
+        printf("\n  ✓ Bandwidth data exported to bandwidth_results.csv\n");
+    } else {
+        perror("Failed to create bandwidth CSV file");
+    }
 }
 
 int main(int argc, char *argv[])

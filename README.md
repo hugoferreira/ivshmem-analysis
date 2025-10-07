@@ -15,6 +15,11 @@ A VM-based solution with shared memory to measure host ↔ guest communication l
 - [x] Write a guest program that reads from the ivshmem PCI BAR2
 - [x] Use high-resolution timers (`clock_gettime()`) to measure latency
 - [x] Use larger transfers (one 4k uncompressed raw image frame) to measure bandwidth
+- [x] Export benchmark results to CSV files
+- [x] Python data science analysis tools:
+  - [x] Plot histograms and time series
+  - [x] Calculate statistics (p50, p90, p95, p99, min, max, mean, stddev)
+  - [x] Generate comprehensive performance reports
 
 ## Prerequisites
 
@@ -225,6 +230,8 @@ wget https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd
 - `host_writer.c` - Host program to write to shared memory and measure performance
 - `guest_reader.c` - Guest program to read from ivshmem PCI device
 - `run_test.sh` - Automated test script to run both programs
+- `analyze_results.py` - Python script for statistical analysis and visualization
+- `requirements.txt` - Python dependencies for analysis
 - `Makefile` - Build script for compiling programs
 - `debian-12-generic-amd64.qcow2` - Base cloud image (~428MB)
 - `ivshmem-disk.qcow2` - VM disk (thin-provisioned, starts ~200KB)
@@ -232,6 +239,16 @@ wget https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd
 - `temp_id_rsa` / `temp_id_rsa.pub` - SSH key pair
 - `cloud-init-config/` - Cloud-init configuration files
 - `/dev/shm/ivshmem` - Shared memory file (Linux only)
+
+### Generated Files
+
+After running tests:
+- `latency_results.csv` - Latency test measurements
+- `bandwidth_results.csv` - Bandwidth test results
+- `latency_histogram.png` - Latency distribution plots
+- `latency_over_time.png` - Time series plot
+- `latency_percentiles.png` - Percentile chart
+- `performance_report.txt` - Comprehensive statistics report
 
 ## Running the Performance Tests
 
@@ -290,6 +307,60 @@ sequenceDiagram
     Note over H,G: Results
     H->>H: Display latency: ~60µs avg, ~0.6µs min
     H->>H: Display bandwidth: ~162 GB/s
+```
+
+## Analyzing Results
+
+The performance test automatically exports results to CSV files for detailed analysis.
+
+### CSV Output Files
+
+After running the test, you'll find:
+- `latency_results.csv` - All latency measurements (iteration, latency_ns, latency_us)
+- `bandwidth_results.csv` - Bandwidth test results
+
+### Statistical Analysis
+
+Install Python dependencies:
+```bash
+pip install -r requirements.txt
+```
+
+Run the analysis script:
+```bash
+./analyze_results.py
+```
+
+The script will:
+1. **Load CSV data** using pandas
+2. **Calculate statistics**:
+   - Min, Max, Mean, Median, Std Dev
+   - Percentiles: p50, p90, p95, p99, p99.9
+   - Estimated one-way latency (half of round-trip)
+3. **Generate plots**:
+   - `latency_histogram.png` - Distribution of latencies (linear and log scale)
+   - `latency_over_time.png` - Time series showing latency variation
+   - `latency_percentiles.png` - Percentile chart with marked important values
+4. **Create report**:
+   - `performance_report.txt` - Comprehensive text report with all statistics
+
+### Example Output
+
+```
+=== Statistics for Round-Trip Latency (microseconds) ===
+Count:              1000
+Min:                0.60 μs
+Max:              315.42 μs
+Mean:              62.15 μs
+Median (p50):      58.30 μs
+Std Dev:           18.45 μs
+
+Percentiles:
+p50:               58.30 μs
+p90:               85.20 μs
+p95:               98.75 μs
+p99:              142.80 μs
+p99.9:            280.50 μs
 ```
 
 ## Performance Notes

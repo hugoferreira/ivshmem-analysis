@@ -1,0 +1,35 @@
+# VM and cloud-init files
+debian-12-generic-amd64.qcow2
+ivshmem-disk.qcow2
+cloud-init.iso
+
+# SSH keys
+temp_id_rsa
+temp_id_rsa.pub
+
+# Compiled binaries
+host_writer
+guest_reader
+
+# Generated test results
+latency_results.csv
+bandwidth_results.csv
+*.png
+performance_report.txt
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+venv/
+.venv/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
