@@ -53,8 +53,8 @@ static inline uint64_t get_time_ns(void)
 
 void test_latency(volatile struct shared_data *shm, int iterations)
 {
-    printf("\n=== Latency Test (Round-Trip) ===\n");
-    printf("Sending %d messages and measuring round-trip time...\n", iterations);
+    printf("\n=== Latency Test (One-Way) ===\n");
+    printf("Sending %d messages and measuring one-way latency...\n", iterations);
     
     // Allocate array to store all latency measurements
     uint64_t *latencies = malloc(iterations * sizeof(uint64_t));
@@ -92,11 +92,14 @@ void test_latency(volatile struct shared_data *shm, int iterations)
             }
         }
         
+        // Stop timer as soon as guest acknowledges receipt - this measures true latency
+        uint64_t end_time = get_time_ns();
+        
         if (shm->guest_ack == GUEST_ACK_NONE) {
             continue; // Skip this iteration
         }
         
-        // Wait for guest to complete processing (timeout after 5ms more)
+        // Wait for guest to complete processing (for protocol completeness, but don't time it)
         timeout_time = get_time_ns() + 5000000ULL; // 5ms
         while (shm->guest_ack == GUEST_ACK_RECEIVED) {
             if (get_time_ns() > timeout_time) {
@@ -105,9 +108,7 @@ void test_latency(volatile struct shared_data *shm, int iterations)
             }
         }
         
-        uint64_t end_time = get_time_ns();
-        
-        if (shm->guest_ack == GUEST_ACK_PROCESSED) {
+        if (shm->guest_ack == GUEST_ACK_RECEIVED || shm->guest_ack == GUEST_ACK_PROCESSED) {
             uint64_t latency = end_time - start_time;
             latencies[successful] = latency;  // Store measurement
             total_latency += latency;
@@ -117,7 +118,7 @@ void test_latency(volatile struct shared_data *shm, int iterations)
             if (latency > max_latency) max_latency = latency;
             
             if (i % 100 == 0) {
-                printf("  [%d] Round-trip: %lu ns (%.2f µs)\n", 
+                printf("  [%d] One-way latency: %lu ns (%.2f µs)\n", 
                        i, latency, latency / 1000.0);
             }
         }
@@ -129,16 +130,13 @@ void test_latency(volatile struct shared_data *shm, int iterations)
     if (successful > 0) {
         printf("\nResults:\n");
         printf("  Successful: %d/%d\n", successful, iterations);
-        printf("  Average round-trip: %lu ns (%.2f µs)\n", 
+        printf("  Average one-way latency: %lu ns (%.2f µs)\n", 
                total_latency / successful, 
                (total_latency / successful) / 1000.0);
-        printf("  Min round-trip: %lu ns (%.2f µs)\n", 
+        printf("  Min one-way latency: %lu ns (%.2f µs)\n", 
                min_latency, min_latency / 1000.0);
-        printf("  Max round-trip: %lu ns (%.2f µs)\n", 
+        printf("  Max one-way latency: %lu ns (%.2f µs)\n", 
                max_latency, max_latency / 1000.0);
-        printf("  Estimated one-way: ~%lu ns (%.2f µs)\n", 
-               (total_latency / successful) / 2,
-               ((total_latency / successful) / 2) / 1000.0);
         
         // Export to CSV
         FILE *csv = fopen("latency_results.csv", "w");

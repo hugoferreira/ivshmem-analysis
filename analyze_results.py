@@ -234,17 +234,20 @@ def plot_bandwidth_analysis(bandwidth_df, output_file='bandwidth_analysis.png'):
     ax1.grid(True, alpha=0.3)
     
     # 2. Bandwidth vs Transfer Size
-    ax2.scatter(successful_df['test_size_mb'], successful_df['bandwidth_gbps'], 
-               c=successful_df['frame_type'].astype('category').cat.codes, 
-               alpha=0.7, s=60)
+    # Create consistent color mapping
+    colors = plt.cm.tab10(np.linspace(0, 1, len(frame_types)))
+    color_map = {ft: colors[i] for i, ft in enumerate(frame_types)}
+    
+    # Plot each frame type with consistent colors
+    for ft in frame_types:
+        ft_data = successful_df[successful_df['frame_type'] == ft]
+        ax2.scatter(ft_data['test_size_mb'], ft_data['bandwidth_gbps'], 
+                   c=[color_map[ft]], label=ft, alpha=0.7, s=60)
+    
     ax2.set_xlabel('Transfer Size (MB)', fontsize=12)
     ax2.set_ylabel('Bandwidth (GB/s)', fontsize=12)
     ax2.set_title('Bandwidth vs Transfer Size', fontsize=14, fontweight='bold')
     ax2.grid(True, alpha=0.3)
-    
-    # Add frame type legend
-    for i, ft in enumerate(frame_types):
-        ax2.scatter([], [], c=f'C{i}', label=ft, s=60)
     ax2.legend()
     
     # 3. Transfer Duration by Frame Type
