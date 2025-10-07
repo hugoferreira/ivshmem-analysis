@@ -92,6 +92,8 @@ void monitor_latency(volatile struct shared_data *shm)
             }
         }
         
+        // Use interrupt instead of busy-waiting
+        
         // Small sleep to avoid busy-waiting
         usleep(10);
     }
