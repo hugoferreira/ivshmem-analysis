@@ -303,7 +303,7 @@ sequenceDiagram
     
     Note over H,G: Realistic Bandwidth Test - Robust Protocol
     loop For each frame size (1080p, 1440p, 4K)
-        loop For each iteration (5x per frame size)
+        loop For each iteration (10x per frame size)
             Note over H: Wait for guest ready state
             H->>M: Poll for guest_ack=NONE (guest ready)
             H->>M: Clear shared memory header
@@ -338,9 +338,9 @@ sequenceDiagram
     end
     
     Note over H,G: Results - Comprehensive Analysis
-    H->>H: Latency: 232µs avg, 84µs min, 1597µs max (100% success)
-    H->>H: Bandwidth: 1080p=11.7GB/s, 1440p=26.0GB/s, 4K=70.5GB/s
-    H->>H: Data integrity: 93.3% overall success with SHA256 verification
+    H->>H: Latency: 222µs avg, 83µs min, 3398µs max (99.9% success)
+    H->>H: Bandwidth: 1080p=14.1GB/s, 1440p=33.1GB/s, 4K=81.8GB/s
+    H->>H: Data integrity: 96.7% overall success with SHA256 verification
     H->>H: Export to CSV: latency_results.csv, bandwidth_results.csv
 ```
 
@@ -406,49 +406,55 @@ LATENCY ANALYSIS
 ======================================================================
 
 Statistics for Round-Trip Latency (microseconds)
-Count:                 1000
-Min:                  83.81 μs
-Max:                1596.98 μs
-Mean:                232.92 μs
-Median (p50):        198.65 μs
-Std Dev:             154.02 μs
+Count:                  999
+Min:                  82.77 μs
+Max:                3398.45 μs
+Mean:                221.67 μs
+Median (p50):        185.90 μs
+Std Dev:             178.05 μs
 
 Percentiles:
-p50:                 198.65 μs
-p90:                 331.10 μs
-p95:                 427.59 μs
-p99:                 987.34 μs
-p99.9:              1495.94 μs
+p50:                 185.90 μs
+p90:                 341.66 μs
+p95:                 452.66 μs
+p99:                1022.40 μs
 
 Estimated One-Way Latency:
-  Mean:          116458 ns (  116.46 μs)
-  Median:         99325 ns (   99.32 μs)
+  Mean:          110836 ns (  110.84 μs)
+  Median:         92948 ns (   92.95 μs)
 
 ======================================================================
 BANDWIDTH ANALYSIS
 ======================================================================
 
 1080P (5.93 MB):
-  Success Rate:            100.0% (5/5)
-  Bandwidth (GB/s):        11.72 ±   8.19
-    Range:                  0.06 -    22.96
-  Duration (ms):           20.76 ±  45.44
-    Range:                  0.25 -   102.04
+  Success Rate:            100.0% (10/10)
+  Bandwidth (GB/s):        14.13 ±   6.99
+    Range:                  0.06 -    21.92
+  Duration (ms):            9.49 ±  28.67
+    Range:                  0.26 -    91.09
+
+1440P (10.55 MB):
+  Success Rate:            100.0% (10/10)
+  Bandwidth (GB/s):        33.14 ±  12.63
+    Range:                  0.06 -    45.96
+  Duration (ms):           18.55 ±  57.76
+    Range:                  0.22 -   182.95
 
 4K (23.73 MB):
-  Success Rate:             80.0% (4/5)
-  Bandwidth (GB/s):        70.50 ±  23.32
-    Range:                 43.62 -    98.03
-  Duration (ms):            0.36 ±   0.13
-    Range:                  0.24 -     0.53
+  Success Rate:             90.0% (9/10)
+  Bandwidth (GB/s):        81.79 ±  29.79
+    Range:                 19.96 -   116.93
+  Duration (ms):            0.37 ±   0.30
+    Range:                  0.20 -     1.16
 
 OVERALL BANDWIDTH SUMMARY:
-  Total tests:          15
-  Successful:           14 (93.3%)
-  Peak bandwidth:       98.03 GB/s
-  Average bandwidth:    33.63 GB/s
-  Fastest transfer:     0.24 ms
-  Slowest transfer:     191.83 ms
+  Total tests:          30
+  Successful:           29 (96.7%)
+  Peak bandwidth:       116.93 GB/s
+  Average bandwidth:    41.69 GB/s
+  Fastest transfer:     0.20 ms
+  Slowest transfer:     182.95 ms
 ```
 
 ## Performance Notes
@@ -456,16 +462,16 @@ OVERALL BANDWIDTH SUMMARY:
 - **With KVM**: VM boots in ~10 seconds, near-native performance
 - **Without KVM (TCG)**: VM boots in 3-5 minutes, 10-100x slower
 - **Shared memory latency** (measured with robust protocol):
-  - Average round-trip: ~233 µs (100% success rate)
-  - Minimum round-trip: ~84 µs
-  - Maximum round-trip: ~1597 µs
-  - Estimated one-way: ~116 µs
+  - Average round-trip: ~222 µs (99.9% success rate)
+  - Minimum round-trip: ~83 µs
+  - Maximum round-trip: ~3398 µs
+  - Estimated one-way: ~111 µs
 - **Realistic Throughput** (measured with cache-aware testing):
-  - Random frame data with SHA256 verification
+  - Random frame data with SHA256 verification (fixed randomization)
   - Multiple frame sizes: 1080p (~6MB), 1440p (~11MB), 4K (~24MB)
-  - Peak bandwidth: 98.03 GB/s (cache-friendly scenarios)
-  - Average bandwidth: 33.63 GB/s across all successful transfers
-  - Data integrity: 93.3% success rate with complete verification
+  - Peak bandwidth: 116.93 GB/s (cache-friendly scenarios)
+  - Average bandwidth: 41.69 GB/s across all successful transfers
+  - Data integrity: 96.7% success rate with complete verification
   - Cache effects: First iteration slower (cache warming), subsequent faster
 
 ## Improved Test Methodology
@@ -481,6 +487,7 @@ The performance test has been significantly enhanced with a robust two-phase ack
 
 ### Cache-Aware Testing
 - **Random Data Generation**: Uses cryptographically random data for each test iteration to avoid cache-friendly patterns
+- **Fixed Randomization**: Improved fallback random generation with high-resolution timing + iteration counter to ensure unique data
 - **Cache Flushing**: Explicitly flushes CPU cache before timing measurements
 - **Full Buffer Verification**: Guest reads entire buffer cache-line by cache-line to ensure data is actually transferred
 - **Unique Sequence Numbers**: Each bandwidth test gets unique sequence (0xFFFF + iteration) to prevent confusion
@@ -489,11 +496,11 @@ The performance test has been significantly enhanced with a robust two-phase ack
 - **Signature Mechanism**: Each transfer includes `0xDEADBEEF` magic + SHA256 hash
 - **Complete Verification**: Guest calculates SHA256 of entire received buffer and compares with expected hash
 - **Integrity Detection**: Any corruption or incomplete transfer is immediately detected and reported
-- **Integrity Statistics**: Success rates tracked per frame size (1080p: 100%, 1440p: 100%, 4K: 80%)
+- **Integrity Statistics**: Success rates tracked per frame size (1080p: 100%, 1440p: 100%, 4K: 90%)
 
 ### Realistic Frame Sizes & Analysis
 - **Multiple Resolutions**: Tests 1080p (5.93MB), 1440p (10.55MB), and 4K (23.73MB) frame sizes (24bpp)
-- **Multiple Iterations**: 5 iterations per frame size with different random data
+- **Multiple Iterations**: 10 iterations per frame size with different random data
 - **Comprehensive Statistics**: Min/max/mean/median/stddev for bandwidth and duration per frame type
 - **Visual Analysis**: 4-panel bandwidth analysis plots showing distribution, scaling, duration, and success rates
 

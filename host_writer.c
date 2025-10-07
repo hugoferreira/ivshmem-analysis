@@ -176,7 +176,13 @@ static void generate_random_frame(uint8_t *buffer, int width, int height) {
     // Generate cryptographically random data to avoid cache-friendly patterns
     if (RAND_bytes(buffer, frame_size) != 1) {
         // Fallback to pseudo-random if OpenSSL fails
-        srand(time(NULL));
+        // Use high-resolution time + iteration counter for better seed diversity
+        static int iteration_counter = 0;
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        unsigned int seed = (unsigned int)(ts.tv_sec ^ ts.tv_nsec ^ (++iteration_counter));
+        srand(seed);
+        
         for (size_t i = 0; i < frame_size; i++) {
             buffer[i] = rand() & 0xFF;
         }
