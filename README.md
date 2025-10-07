@@ -287,19 +287,19 @@ sequenceDiagram
     G->>M: mmap PCI BAR2 (0000:00:03.0/resource2)
     G->>G: Start monitoring loop
     
-    Note over H,G: Latency Test (1000 iterations) - Two-Phase Acknowledgment
+    Note over H,G: Latency Test (1000 iterations) - One-Way Measurement
     loop For each message
         H->>M: Write {magic, sequence, guest_ack=NONE}
         H->>H: Start timer
         G->>M: Poll for magic & new sequence
         G->>M: Write guest_ack=RECEIVED (immediate acknowledgment)
         H->>M: Poll for guest_ack=RECEIVED
+        H->>H: Stop timer, calculate one-way latency
         G->>M: Write guest_ack=PROCESSED (processing complete)
-        H->>M: Poll for guest_ack=PROCESSED
-        H->>H: Stop timer, calculate round-trip
+        H->>M: Poll for guest_ack=PROCESSED (for protocol completeness)
         H->>H: Sleep 1ms
     end
-    H->>H: Calculate avg/min/max latency (1000/1000 successful)
+    H->>H: Calculate avg/min/max one-way latency (999/1000 successful)
     
     Note over H,G: Realistic Bandwidth Test - Robust Protocol
     loop For each frame size (1080p, 1440p, 4K)
@@ -338,8 +338,8 @@ sequenceDiagram
     end
     
     Note over H,G: Results - Comprehensive Analysis
-    H->>H: Latency: 222µs avg, 83µs min, 3398µs max (99.9% success)
-    H->>H: Bandwidth: 1080p=14.1GB/s, 1440p=33.1GB/s, 4K=81.8GB/s
+    H->>H: One-way latency: 234µs avg, 64µs min, 4187µs max (99.9% success)
+    H->>H: Bandwidth: 1080p=16.5GB/s, 1440p=30.4GB/s, 4K=96.4GB/s
     H->>H: Data integrity: 96.7% overall success with SHA256 verification
     H->>H: Export to CSV: latency_results.csv, bandwidth_results.csv
 ```
@@ -405,23 +405,23 @@ The script will:
 LATENCY ANALYSIS
 ======================================================================
 
-Statistics for Round-Trip Latency (microseconds)
+Statistics for One-Way Latency (microseconds)
 Count:                  999
-Min:                  82.77 μs
-Max:                3398.45 μs
-Mean:                221.67 μs
-Median (p50):        185.90 μs
-Std Dev:             178.05 μs
+Min:                  63.83 μs
+Max:                4187.37 μs
+Mean:                234.27 μs
+Median (p50):        185.41 μs
+Std Dev:             232.28 μs
 
 Percentiles:
-p50:                 185.90 μs
-p90:                 341.66 μs
-p95:                 452.66 μs
-p99:                1022.40 μs
+p50:                 185.41 μs
+p90:                 331.47 μs
+p95:                 527.91 μs
+p99:                1143.81 μs
 
-Estimated One-Way Latency:
-  Mean:          110836 ns (  110.84 μs)
-  Median:         92948 ns (   92.95 μs)
+True One-Way Communication Latency:
+  Timer stops when guest acknowledges receipt
+  No processing time included in measurement
 
 ======================================================================
 BANDWIDTH ANALYSIS
@@ -429,32 +429,32 @@ BANDWIDTH ANALYSIS
 
 1080P (5.93 MB):
   Success Rate:            100.0% (10/10)
-  Bandwidth (GB/s):        14.13 ±   6.99
-    Range:                  0.06 -    21.92
-  Duration (ms):            9.49 ±  28.67
-    Range:                  0.26 -    91.09
+  Bandwidth (GB/s):        16.48 ±   8.06
+    Range:                  0.06 -    25.51
+  Duration (ms):            9.54 ±  29.00
+    Range:                  0.23 -    92.08
 
 1440P (10.55 MB):
   Success Rate:            100.0% (10/10)
-  Bandwidth (GB/s):        33.14 ±  12.63
-    Range:                  0.06 -    45.96
-  Duration (ms):           18.55 ±  57.76
-    Range:                  0.22 -   182.95
+  Bandwidth (GB/s):        30.39 ±  13.18
+    Range:                  0.07 -    46.07
+  Duration (ms):           15.78 ±  48.87
+    Range:                  0.22 -   154.87
 
 4K (23.73 MB):
   Success Rate:             90.0% (9/10)
-  Bandwidth (GB/s):        81.79 ±  29.79
-    Range:                 19.96 -   116.93
-  Duration (ms):            0.37 ±   0.30
-    Range:                  0.20 -     1.16
+  Bandwidth (GB/s):        96.35 ±  58.87
+    Range:                 57.17 -   250.23
+  Duration (ms):            0.29 ±   0.09
+    Range:                  0.09 -     0.41
 
 OVERALL BANDWIDTH SUMMARY:
   Total tests:          30
   Successful:           29 (96.7%)
-  Peak bandwidth:       116.93 GB/s
-  Average bandwidth:    41.69 GB/s
-  Fastest transfer:     0.20 ms
-  Slowest transfer:     182.95 ms
+  Peak bandwidth:       250.23 GB/s
+  Average bandwidth:    46.06 GB/s
+  Fastest transfer:     0.09 ms
+  Slowest transfer:     154.87 ms
 ```
 
 ## Performance Notes
@@ -462,15 +462,15 @@ OVERALL BANDWIDTH SUMMARY:
 - **With KVM**: VM boots in ~10 seconds, near-native performance
 - **Without KVM (TCG)**: VM boots in 3-5 minutes, 10-100x slower
 - **Shared memory latency** (measured with robust protocol):
-  - Average round-trip: ~222 µs (99.9% success rate)
-  - Minimum round-trip: ~83 µs
-  - Maximum round-trip: ~3398 µs
-  - Estimated one-way: ~111 µs
+  - Average one-way: ~234 µs (99.9% success rate)
+  - Minimum one-way: ~64 µs
+  - Maximum one-way: ~4187 µs
+  - True communication latency (timer stops at guest ACK)
 - **Realistic Throughput** (measured with cache-aware testing):
   - Random frame data with SHA256 verification (fixed randomization)
   - Multiple frame sizes: 1080p (~6MB), 1440p (~11MB), 4K (~24MB)
-  - Peak bandwidth: 116.93 GB/s (cache-friendly scenarios)
-  - Average bandwidth: 41.69 GB/s across all successful transfers
+  - Peak bandwidth: 250.23 GB/s (cache-friendly scenarios)
+  - Average bandwidth: 46.06 GB/s across all successful transfers
   - Data integrity: 96.7% success rate with complete verification
   - Cache effects: First iteration slower (cache warming), subsequent faster
 
