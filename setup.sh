@@ -5,10 +5,10 @@
 # QEMU/KVM with ivshmem (Inter-VM Shared Memory device), which provides a PCI device that 
 # maps to shared memory accessible by both host and guest.
 
-# Needs to work on both MacOS and Linux for x86_64 architecture.
+# Needs to work on both ARM64 and x86_64 architecture. Linux only, as ivshmem is not available on macOS.
 
 # Variables
-IVSHMEM_SIZE=64
+IVSHMEM_SIZE=128
 VM_NAME="ivshmem-vm"
 VM_DISK="ivshmem-disk.qcow2"
 CLOUD_IMAGE="debian-12-generic-amd64.qcow2"
@@ -20,7 +20,7 @@ QEMU_PATH="/usr/bin/qemu-system-x86_64"
 # Detect OS
 OS=$(uname -s)
 
-# Create a 64MB shared memory file (use local directory on macOS since /dev/shm doesn't exist)
+# Create a IVSHMEM_SIZE shared memory file
 if [ "$OS" = "Darwin" ]; then
   # macOS: use local file
   dd if=/dev/zero of=$SHMEM_FILE bs=1M count=$IVSHMEM_SIZE

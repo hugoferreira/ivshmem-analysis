@@ -2,7 +2,7 @@
 
 CC = gcc
 CFLAGS = -Wall -O2 -std=c11
-LDFLAGS = -lrt
+LDFLAGS = -lrt -lssl -lcrypto
 
 all: host guest
 
@@ -19,7 +19,7 @@ deploy: guest
 		guest_reader.c debian@localhost:/tmp/
 	@echo "Compiling on VM..."
 	ssh -i temp_id_rsa -p 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-		debian@localhost 'cd /tmp && gcc -Wall -O2 -std=c11 -o guest_reader guest_reader.c -lrt'
+		debian@localhost 'cd /tmp && gcc -Wall -O2 -std=c11 -o guest_reader guest_reader.c -lrt -lssl -lcrypto'
 	@echo "Guest program ready at /tmp/guest_reader on VM"
 
 # Run test (starts guest in background via SSH, then runs host)

@@ -27,7 +27,7 @@ A VM-based solution with shared memory to measure host ↔ guest communication l
 ```bash
 # Install required packages
 sudo apt-get update
-sudo apt-get install -y qemu-system-x86 genisoimage
+sudo apt-get install -y qemu-system-x86 genisoimage libssl-dev
 
 # Enable KVM acceleration (required for good performance)
 sudo groupadd kvm  # if it doesn't exist
@@ -248,6 +248,7 @@ After running tests:
 - `latency_histogram.png` - Latency distribution plots
 - `latency_over_time.png` - Time series plot
 - `latency_percentiles.png` - Percentile chart
+- `bandwidth_analysis.png` - Comprehensive bandwidth analysis (4-panel visualization)
 - `performance_report.txt` - Comprehensive statistics report
 
 ## Running the Performance Tests
@@ -256,12 +257,16 @@ After running tests:
 # Make sure VM is running
 ./setup.sh
 
-# Compile the programs
-gcc -Wall -O2 -std=c11 -o host_writer host_writer.c -lrt
+# Compile the programs (requires OpenSSL development libraries)
+make all
 
+# Deploy guest program to VM and run automated test
+make test
+
+# Or manually:
 # Copy and compile guest program on VM
 scp -i temp_id_rsa -P 2222 guest_reader.c debian@localhost:/tmp/
-ssh -i temp_id_rsa -p 2222 debian@localhost 'cd /tmp && gcc -Wall -O2 -std=c11 -o guest_reader guest_reader.c -lrt'
+ssh -i temp_id_rsa -p 2222 debian@localhost 'cd /tmp && gcc -Wall -O2 -std=c11 -o guest_reader guest_reader.c -lrt -lssl -lcrypto'
 
 # Run the automated test
 ./run_test.sh
@@ -282,31 +287,61 @@ sequenceDiagram
     G->>M: mmap PCI BAR2 (0000:00:03.0/resource2)
     G->>G: Start monitoring loop
     
-    Note over H,G: Latency Test (1000 iterations)
+    Note over H,G: Latency Test (1000 iterations) - Two-Phase Acknowledgment
     loop For each message
-        H->>M: Write {magic, sequence, guest_ack=0}
+        H->>M: Write {magic, sequence, guest_ack=NONE}
         H->>H: Start timer
         G->>M: Poll for magic & new sequence
-        G->>M: Write guest_ack=1
-        H->>M: Poll for guest_ack=1
+        G->>M: Write guest_ack=RECEIVED (immediate acknowledgment)
+        H->>M: Poll for guest_ack=RECEIVED
+        G->>M: Write guest_ack=PROCESSED (processing complete)
+        H->>M: Poll for guest_ack=PROCESSED
         H->>H: Stop timer, calculate round-trip
         H->>H: Sleep 1ms
     end
-    H->>H: Calculate avg/min/max latency
+    H->>H: Calculate avg/min/max latency (1000/1000 successful)
     
-    Note over H,G: Bandwidth Test
-    H->>M: Write test pattern (33MB)
-    H->>M: Write {magic, sequence=0xFFFF, data_size, guest_ack=0}
-    H->>H: Start timer
-    G->>M: Poll for sequence=0xFFFF
-    G->>M: Read & verify data pattern
-    G->>M: Write guest_ack=1
-    H->>M: Poll for guest_ack=1
-    H->>H: Stop timer, calculate bandwidth
+    Note over H,G: Realistic Bandwidth Test - Robust Protocol
+    loop For each frame size (1080p, 1440p, 4K)
+        loop For each iteration (5x per frame size)
+            Note over H: Wait for guest ready state
+            H->>M: Poll for guest_ack=NONE (guest ready)
+            H->>M: Clear shared memory header
+            H->>H: Generate random frame data (width × height × 3 bytes)
+            H->>H: Calculate SHA256 hash of data
+            H->>H: Flush CPU cache to ensure memory access
+            H->>M: Write {magic, sequence=0xFFFF+iter, data_size, signature_magic=0xDEADBEEF, SHA256}
+            H->>H: Start timer
+            
+            Note over G: Two-Phase Processing
+            G->>M: Poll for new sequence (≥0xFFFF)
+            G->>M: Write guest_ack=RECEIVED (message received)
+            H->>M: Poll for guest_ack=RECEIVED
+            
+            G->>M: Force read entire buffer (cache line by cache line)
+            G->>G: Calculate SHA256 of received data
+            G->>G: Verify signature_magic=0xDEADBEEF + SHA256 match
+            
+            alt SHA256 Match
+                G->>M: Write guest_ack=PROCESSED (success)
+            else SHA256 Mismatch
+                G->>M: Write guest_ack=ERROR + error_code=1 (integrity failure)
+            end
+            
+            H->>M: Poll for guest_ack=PROCESSED or ERROR
+            H->>H: Stop timer, calculate bandwidth
+            
+            Note over G: Reset for next iteration
+            G->>G: Wait 10ms for host to read result
+            G->>M: Write guest_ack=NONE (ready for next message)
+        end
+    end
     
-    Note over H,G: Results
-    H->>H: Display latency: ~60µs avg, ~0.6µs min
-    H->>H: Display bandwidth: ~162 GB/s
+    Note over H,G: Results - Comprehensive Analysis
+    H->>H: Latency: 232µs avg, 84µs min, 1597µs max (100% success)
+    H->>H: Bandwidth: 1080p=11.7GB/s, 1440p=26.0GB/s, 4K=70.5GB/s
+    H->>H: Data integrity: 93.3% overall success with SHA256 verification
+    H->>H: Export to CSV: latency_results.csv, bandwidth_results.csv
 ```
 
 ## Analyzing Results
@@ -317,7 +352,7 @@ The performance test automatically exports results to CSV files for detailed ana
 
 After running the test, you'll find:
 - `latency_results.csv` - All latency measurements (iteration, latency_ns, latency_us)
-- `bandwidth_results.csv` - Bandwidth test results
+- `bandwidth_results.csv` - Realistic bandwidth test results with multiple frame sizes and iterations
 
 ### Statistical Analysis
 
@@ -359,39 +394,114 @@ The script will:
    - `latency_histogram.png` - Distribution of latencies (linear and log scale)
    - `latency_over_time.png` - Time series showing latency variation
    - `latency_percentiles.png` - Percentile chart with marked important values
-4. **Create report**:
-   - `performance_report.txt` - Comprehensive text report with all statistics
+   - `bandwidth_analysis.png` - 4-panel bandwidth analysis (distribution, scaling, duration, success rates)
+4. **Create comprehensive report**:
+   - `performance_report.txt` - Detailed statistics for both latency and bandwidth tests
 
 ### Example Output
 
 ```
-=== Statistics for Round-Trip Latency (microseconds) ===
-Count:              1000
-Min:                0.60 μs
-Max:              315.42 μs
-Mean:              62.15 μs
-Median (p50):      58.30 μs
-Std Dev:           18.45 μs
+======================================================================
+LATENCY ANALYSIS
+======================================================================
+
+Statistics for Round-Trip Latency (microseconds)
+Count:                 1000
+Min:                  83.81 μs
+Max:                1596.98 μs
+Mean:                232.92 μs
+Median (p50):        198.65 μs
+Std Dev:             154.02 μs
 
 Percentiles:
-p50:               58.30 μs
-p90:               85.20 μs
-p95:               98.75 μs
-p99:              142.80 μs
-p99.9:            280.50 μs
+p50:                 198.65 μs
+p90:                 331.10 μs
+p95:                 427.59 μs
+p99:                 987.34 μs
+p99.9:              1495.94 μs
+
+Estimated One-Way Latency:
+  Mean:          116458 ns (  116.46 μs)
+  Median:         99325 ns (   99.32 μs)
+
+======================================================================
+BANDWIDTH ANALYSIS
+======================================================================
+
+1080P (5.93 MB):
+  Success Rate:            100.0% (5/5)
+  Bandwidth (GB/s):        11.72 ±   8.19
+    Range:                  0.06 -    22.96
+  Duration (ms):           20.76 ±  45.44
+    Range:                  0.25 -   102.04
+
+4K (23.73 MB):
+  Success Rate:             80.0% (4/5)
+  Bandwidth (GB/s):        70.50 ±  23.32
+    Range:                 43.62 -    98.03
+  Duration (ms):            0.36 ±   0.13
+    Range:                  0.24 -     0.53
+
+OVERALL BANDWIDTH SUMMARY:
+  Total tests:          15
+  Successful:           14 (93.3%)
+  Peak bandwidth:       98.03 GB/s
+  Average bandwidth:    33.63 GB/s
+  Fastest transfer:     0.24 ms
+  Slowest transfer:     191.83 ms
 ```
 
 ## Performance Notes
 
 - **With KVM**: VM boots in ~10 seconds, near-native performance
 - **Without KVM (TCG)**: VM boots in 3-5 minutes, 10-100x slower
-- **Shared memory latency** (measured):
-  - Average round-trip: ~60 µs
-  - Minimum round-trip: ~0.6 µs
-  - Estimated one-way: ~30 µs
-- **Throughput** (measured):
-  - 31.6 MB transfer: ~162 GB/s (cache-to-cache)
-  - Note: High bandwidth due to CPU cache; actual memory bandwidth is lower (~25 GB/s for DDR4-3200)
+- **Shared memory latency** (measured with robust protocol):
+  - Average round-trip: ~233 µs (100% success rate)
+  - Minimum round-trip: ~84 µs
+  - Maximum round-trip: ~1597 µs
+  - Estimated one-way: ~116 µs
+- **Realistic Throughput** (measured with cache-aware testing):
+  - Random frame data with SHA256 verification
+  - Multiple frame sizes: 1080p (~6MB), 1440p (~11MB), 4K (~24MB)
+  - Peak bandwidth: 98.03 GB/s (cache-friendly scenarios)
+  - Average bandwidth: 33.63 GB/s across all successful transfers
+  - Data integrity: 93.3% success rate with complete verification
+  - Cache effects: First iteration slower (cache warming), subsequent faster
+
+## Improved Test Methodology
+
+The performance test has been significantly enhanced with a robust two-phase acknowledgment protocol and comprehensive analysis:
+
+### Robust Two-Phase Acknowledgment Protocol
+- **Message Receipt Acknowledgment**: Guest immediately signals `RECEIVED` when message is detected
+- **Processing Complete Acknowledgment**: Guest signals `PROCESSED` (success) or `ERROR` (failure) after verification
+- **Race Condition Prevention**: Host waits for guest to be ready before starting next iteration
+- **Error Detection & Reporting**: Proper error codes and states for debugging failed transfers
+- **State Machine**: Clear IPC semantics with `NONE` → `RECEIVED` → `PROCESSED/ERROR` → `NONE`
+
+### Cache-Aware Testing
+- **Random Data Generation**: Uses cryptographically random data for each test iteration to avoid cache-friendly patterns
+- **Cache Flushing**: Explicitly flushes CPU cache before timing measurements
+- **Full Buffer Verification**: Guest reads entire buffer cache-line by cache-line to ensure data is actually transferred
+- **Unique Sequence Numbers**: Each bandwidth test gets unique sequence (0xFFFF + iteration) to prevent confusion
+
+### Data Integrity Verification
+- **Signature Mechanism**: Each transfer includes `0xDEADBEEF` magic + SHA256 hash
+- **Complete Verification**: Guest calculates SHA256 of entire received buffer and compares with expected hash
+- **Integrity Detection**: Any corruption or incomplete transfer is immediately detected and reported
+- **Integrity Statistics**: Success rates tracked per frame size (1080p: 100%, 1440p: 100%, 4K: 80%)
+
+### Realistic Frame Sizes & Analysis
+- **Multiple Resolutions**: Tests 1080p (5.93MB), 1440p (10.55MB), and 4K (23.73MB) frame sizes (24bpp)
+- **Multiple Iterations**: 5 iterations per frame size with different random data
+- **Comprehensive Statistics**: Min/max/mean/median/stddev for bandwidth and duration per frame type
+- **Visual Analysis**: 4-panel bandwidth analysis plots showing distribution, scaling, duration, and success rates
+
+### Timing Accuracy & Synchronization
+- **Post-Generation Timing**: Timer starts AFTER data generation and cache flushing
+- **End-to-End Measurement**: Includes complete data verification in timing
+- **Proper Synchronization**: Host waits for guest readiness, preventing race conditions
+- **Realistic Workload**: Simulates actual frame transfer scenarios with integrity verification
 
 ## Interrupts with ivshmem (doorbell) – avoid guest busy-wait
 
