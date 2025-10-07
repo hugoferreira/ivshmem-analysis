@@ -393,6 +393,54 @@ p99.9:            280.50 μs
   - 31.6 MB transfer: ~162 GB/s (cache-to-cache)
   - Note: High bandwidth due to CPU cache; actual memory bandwidth is lower (~25 GB/s for DDR4-3200)
 
+## Interrupts with ivshmem (doorbell) – avoid guest busy-wait
+
+The current sample uses `ivshmem-plain` and polling in `guest_reader.c`. To eliminate busy-wait, switch to the interrupt-capable `ivshmem-doorbell`, which uses eventfd-based signaling so the guest can block and wake on an interrupt.
+
+- Mechanism: An ivshmem server coordinates the shared memory and eventfds. QEMU connects to the server via a UNIX socket. The `ivshmem-doorbell` device exposes a Doorbell register and MSI-X vectors; peers signal each other via eventfds, delivered to the guest as interrupts.
+- Benefit: Replace CPU spin with interrupt-driven wakeups (UIO in userspace or a kernel driver), reducing load while preserving latency.
+
+### QEMU (doorbell) configuration
+
+1) Run or point to an ivshmem server (UNIX socket), e.g. `/tmp/ivshmem_socket`.
+
+2) Launch QEMU with `ivshmem-doorbell` (instead of `ivshmem-plain`):
+
+```bash
+qemu-system-x86_64 \
+  -machine q35 \
+  -m 2048 \
+  -chardev socket,id=ivshmem0,path=/tmp/ivshmem_socket \
+  -device ivshmem-doorbell,id=ivshmem0,chardev=ivshmem0,vectors=1 \
+  # ... remaining args (disk, cloud-init, net, accel, cpu) ...
+```
+
+Notes:
+- `vectors=1` allocates a single MSI-X vector; increase if needed.
+- With `ivshmem-doorbell`, the server/socket provides the shared memory and signaling; you typically do not use `-object memory-backend-file`.
+
+### Guest options
+
+- Userspace (UIO): Bind device to `uio_pci_generic` and block on `/dev/uioX` reads; `mmap()` the BAR for data access.
+  ```bash
+  sudo modprobe uio_pci_generic
+  echo 1 | sudo tee /sys/bus/pci/devices/0000:00:03.0/enable
+  echo "1af4 1110" | sudo tee /sys/bus/pci/drivers/uio_pci_generic/new_id
+  # Then use /dev/uio* to wait for interrupts in userspace
+  ```
+- Kernel driver: Configure MSI-X and handle interrupts in kernel, waking userspace.
+
+### Adapting this repo
+
+- Add an env flag (e.g., `IVSHMEM_MODE=doorbell`) in `setup.sh` to switch from `ivshmem-plain` to `ivshmem-doorbell` (`-chardev socket` + `-device ivshmem-doorbell,...`).
+- Update `guest_reader.c` to wait on an interrupt source (UIO read/eventfd) instead of polling for `sequence` changes.
+- Optionally include a small host helper to ring doorbells if needed; typically, event signaling is managed by the ivshmem server when peers write.
+
+### References
+
+- QEMU ivshmem spec (server, eventfd, protocol): https://www.qemu.org/docs/master/specs/ivshmem-spec.html
+- QEMU ivshmem device docs (doorbell model and options): https://www.qemu.org/docs/master/system/devices/ivshmem.html
+
 ## References
 
 - [QEMU ivshmem documentation](https://www.qemu.org/docs/master/system/devices/ivshmem.html)
