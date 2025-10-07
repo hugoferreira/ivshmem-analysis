@@ -321,13 +321,31 @@ After running the test, you'll find:
 
 ### Statistical Analysis
 
-Install Python dependencies:
+**Option 1: Using uv (recommended - fast and handles venv automatically)**
+
+Install uv if not already installed:
 ```bash
-pip install -r requirements.txt
+curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-Run the analysis script:
+Run the analysis (uv will auto-create venv and install dependencies):
 ```bash
+uv run analyze_results.py
+```
+
+**Option 2: Using pip with virtual environment**
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+./analyze_results.py
+```
+
+**Option 3: System-wide installation (Debian/Ubuntu)**
+
+```bash
+sudo apt install python3-pandas python3-numpy python3-matplotlib
 ./analyze_results.py
 ```
 
