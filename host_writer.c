@@ -19,30 +19,15 @@
 #include <sys/stat.h>
 #include <openssl/sha.h>
 #include <openssl/rand.h>
+#include <stdbool.h>
+#include <stdarg.h>
+#include <errno.h>
+
+#include "common.h"
 
 #define SHMEM_PATH "/dev/shm/ivshmem"
 #define SHMEM_SIZE (64 * 1024 * 1024)  // 64MB
 #define FRAME_SIZE (3840 * 2160 * 4)    // 4K RGBA frame (33MB)
-#define MAGIC 0xDEADBEEF
-
-// Guest acknowledgment states
-#define GUEST_ACK_NONE       0  // No acknowledgment
-#define GUEST_ACK_RECEIVED   1  // Message received, processing started
-#define GUEST_ACK_PROCESSED  2  // Message processed successfully
-#define GUEST_ACK_ERROR      3  // Message processing failed
-
-// Shared memory layout
-struct shared_data {
-    uint32_t magic;           // Magic number to verify sync
-    uint32_t sequence;        // Sequence number
-    uint32_t guest_ack;       // Guest acknowledgment state (see defines above)
-    uint32_t data_size;       // Size of data in buffer
-    uint32_t signature_magic; // 0xDEADBEEF at start of signature
-    uint8_t  data_sha256[32]; // SHA256 of the data buffer
-    uint32_t error_code;      // Error code if guest_ack == GUEST_ACK_ERROR
-    uint32_t padding;         // Padding for alignment
-    uint8_t  buffer[0];       // Actual data buffer
-};
 
 static inline uint64_t get_time_ns(void)
 {
@@ -51,110 +36,97 @@ static inline uint64_t get_time_ns(void)
     return (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
 }
 
-void test_latency(volatile struct shared_data *shm, int iterations)
+// Debug logging function
+static void debug_log(const char *format, ...)
 {
-    printf("\n=== Latency Test (One-Way) ===\n");
-    printf("Sending %d messages and measuring one-way latency...\n", iterations);
-    
-    // Allocate array to store all latency measurements
-    uint64_t *latencies = malloc(iterations * sizeof(uint64_t));
-    if (!latencies) {
-        perror("Failed to allocate latency array");
-        return;
-    }
-    
-    uint64_t total_latency = 0;
-    int successful = 0;
-    uint64_t min_latency = UINT64_MAX;
-    uint64_t max_latency = 0;
-    
-    for (int i = 0; i < iterations; i++) {
-        // Reset guest acknowledgment
-        shm->guest_ack = GUEST_ACK_NONE;
-        shm->error_code = 0;
+    va_list args;
+    va_start(args, format);
+    printf("DEBUG: ");
+    vprintf(format, args);
+    printf("\n");
+    fflush(stdout);
+    va_end(args);
+}
+
+// Host state management (host only modifies host_state)
+static void set_host_state(volatile struct shared_data *shm, host_state_t new_state)
+{
+    host_state_t old_state = (host_state_t)shm->host_state;
+    if (old_state != new_state) {
+        printf("HOST STATE: %s -> %s\n", host_state_name(old_state), host_state_name(new_state));
+        shm->host_state = (uint32_t)new_state;
         __sync_synchronize();
-        
-        // Write new message
-        shm->sequence = i;
-        shm->data_size = 0;
-        shm->magic = MAGIC;
-        __sync_synchronize();
-        
-        // Start timer
-        uint64_t start_time = get_time_ns();
-        
-        // Wait for guest to receive message (timeout after 5ms)
-        uint64_t timeout_time = start_time + 5000000ULL; // 5ms
-        while (shm->guest_ack == GUEST_ACK_NONE) {
-            if (get_time_ns() > timeout_time) {
-                printf("  [%d] Timeout waiting for guest to receive message\n", i);
-                break;
-            }
-        }
-        
-        // Stop timer as soon as guest acknowledges receipt - this measures true latency
-        uint64_t end_time = get_time_ns();
-        
-        if (shm->guest_ack == GUEST_ACK_NONE) {
-            continue; // Skip this iteration
-        }
-        
-        // Wait for guest to complete processing (for protocol completeness, but don't time it)
-        timeout_time = get_time_ns() + 5000000ULL; // 5ms
-        while (shm->guest_ack == GUEST_ACK_RECEIVED) {
-            if (get_time_ns() > timeout_time) {
-                printf("  [%d] Timeout waiting for guest to process message\n", i);
-                break;
-            }
-        }
-        
-        if (shm->guest_ack == GUEST_ACK_RECEIVED || shm->guest_ack == GUEST_ACK_PROCESSED) {
-            uint64_t latency = end_time - start_time;
-            latencies[successful] = latency;  // Store measurement
-            total_latency += latency;
-            successful++;
-            
-            if (latency < min_latency) min_latency = latency;
-            if (latency > max_latency) max_latency = latency;
-            
-            if (i % 100 == 0) {
-                printf("  [%d] One-way latency: %lu ns (%.2f µs)\n", 
-                       i, latency, latency / 1000.0);
-            }
-        }
-        
-        // Small delay between messages
-        usleep(1000);
+    }
+}
+
+static host_state_t get_host_state(volatile struct shared_data *shm)
+{
+    return (host_state_t)shm->host_state;
+}
+
+static guest_state_t get_guest_state(volatile struct shared_data *shm)
+{
+    return (guest_state_t)shm->guest_state;
+}
+
+// No helper functions needed - using POSIX IPC primitives directly
+
+// CSV result logging helper
+typedef struct {
+    FILE *file;
+    const char *filename;
+} csv_logger_t;
+
+static csv_logger_t* csv_create(const char *filename, const char *header)
+{
+    csv_logger_t *logger = malloc(sizeof(csv_logger_t));
+    if (!logger) return NULL;
+    
+    logger->file = fopen(filename, "w");
+    logger->filename = filename;
+    
+    if (logger->file && header) {
+        fprintf(logger->file, "%s\n", header);
     }
     
-    if (successful > 0) {
-        printf("\nResults:\n");
-        printf("  Successful: %d/%d\n", successful, iterations);
-        printf("  Average one-way latency: %lu ns (%.2f µs)\n", 
-               total_latency / successful, 
-               (total_latency / successful) / 1000.0);
-        printf("  Min one-way latency: %lu ns (%.2f µs)\n", 
-               min_latency, min_latency / 1000.0);
-        printf("  Max one-way latency: %lu ns (%.2f µs)\n", 
-               max_latency, max_latency / 1000.0);
+    return logger;
+}
+
+
+static void csv_write_bandwidth_result(csv_logger_t *logger, int iteration, const char *frame_name,
+                                     int width, int height, int bpp, size_t size_bytes,
+                                     uint64_t duration_ns, bool success)
+{
+    if (logger && logger->file) {
+        double size_mb = size_bytes / (1024.0 * 1024.0);
+        double duration_ms = duration_ns / 1000000.0;
+        double bandwidth_mbps = success ? (size_mb / (duration_ns / 1e9)) : 0.0;
+        double bandwidth_gbps = success ? (bandwidth_mbps / 1024.0) : 0.0;
         
-        // Export to CSV
-        FILE *csv = fopen("latency_results.csv", "w");
-        if (csv) {
-            fprintf(csv, "iteration,latency_ns,latency_us\n");
-            for (int i = 0; i < successful; i++) {
-                fprintf(csv, "%d,%lu,%.3f\n", i, latencies[i], latencies[i] / 1000.0);
-            }
-            fclose(csv);
-            printf("\n  ✓ Latency data exported to latency_results.csv\n");
-        } else {
-            perror("Failed to create CSV file");
-        }
-    } else {
-        printf("\nNo successful measurements. Is the guest program running?\n");
+        fprintf(logger->file, "%d,%s,%d,%d,%d,%zu,%.2f,%lu,%.2f,%.2f,%.2f,%d\n",
+                iteration, frame_name, width, height, bpp, size_bytes, size_mb,
+                duration_ns, duration_ms, bandwidth_mbps, bandwidth_gbps, success ? 1 : 0);
     }
-    
-    free(latencies);
+}
+
+static void csv_close(csv_logger_t *logger)
+{
+    if (logger) {
+        if (logger->file) {
+            fclose(logger->file);
+            printf("\n  ✓ Data exported to %s\n", logger->filename);
+        }
+        free(logger);
+    }
+}
+
+// Calculate SHA256 hash of buffer
+static void calculate_sha256(const uint8_t *data, size_t len, uint8_t *hash)
+{
+    SHA256_CTX ctx;
+    SHA256_Init(&ctx);
+    SHA256_Update(&ctx, data, len);
+    SHA256_Final(hash, &ctx);
 }
 
 // Cache flush function to ensure data comes from memory, not cache
@@ -187,12 +159,163 @@ static void generate_random_frame(uint8_t *buffer, int width, int height) {
     }
 }
 
-// Calculate SHA256 hash of buffer
-static void calculate_sha256(const uint8_t *data, size_t len, uint8_t *hash) {
-    SHA256_CTX ctx;
-    SHA256_Init(&ctx);
-    SHA256_Update(&ctx, data, len);
-    SHA256_Final(hash, &ctx);
+// Wait for guest state change with timeout
+static bool wait_for_guest_state(volatile struct shared_data *shm, guest_state_t expected_state, 
+                                  uint64_t timeout_ns, const char *description)
+{
+    uint64_t start_time = get_time_ns();
+    
+    while (get_guest_state(shm) != expected_state) {
+        if (get_time_ns() - start_time > timeout_ns) {
+            debug_log("TIMEOUT waiting for guest state %s (current: %s)", 
+                     guest_state_name(expected_state), 
+                     guest_state_name(get_guest_state(shm)));
+            return false;
+        }
+        usleep(10); // 10 microsecond polling interval
+    }
+    
+    return true;
+}
+
+void test_latency(volatile struct shared_data *shm, int iterations)
+{
+    printf("\n=== Latency Test (State-Based Protocol) ===\n");
+    printf("Sending %d messages with 4K frame data and measuring latency...\n", iterations);
+    
+    // Create CSV logger with enhanced header
+    csv_logger_t *csv = csv_create("latency_results.csv", "iteration,latency_ns,latency_us,processing_ns,processing_us");
+    
+    // Calculate available buffer size and use 4K frame for latency test
+    size_t header_size = offsetof(struct shared_data, buffer);
+    size_t max_data_size = SHMEM_SIZE - header_size;
+    
+    // Use 4K frame (3840x2160x3 = 24.8MB) for latency test
+    int width = 3840, height = 2160, bpp = 3;
+    size_t frame_size = width * height * bpp;
+    
+    if (frame_size > max_data_size) {
+        printf("ERROR: 4K frame too large (%zu bytes > %zu bytes)\n", frame_size, max_data_size);
+        csv_close(csv);
+        return;
+    }
+    
+    printf("Using 4K frame: %dx%d, %.2f MB per message\n", 
+           width, height, frame_size / (1024.0 * 1024.0));
+    
+    uint64_t total_latency = 0;
+    uint64_t total_processing = 0;
+    int successful = 0;
+    uint64_t min_latency = UINT64_MAX;
+    uint64_t max_latency = 0;
+    
+    for (int i = 0; i < iterations; i++) {
+        // PREPARE ALL DATA FIRST - BEFORE changing state!
+        
+        // Generate fresh random frame data for each iteration
+        uint8_t *data_ptr = (uint8_t *)&shm->buffer[0];
+        generate_random_frame(data_ptr, width, height);
+        
+        // Calculate SHA256 of the data
+        uint8_t expected_hash[32];
+        calculate_sha256(data_ptr, frame_size, expected_hash);
+        
+        // Flush cache to ensure data comes from memory
+        flush_cache_range((void *)data_ptr, frame_size);
+        
+        // Reset error code
+        shm->error_code = 0;
+        __sync_synchronize();
+        
+        // Prepare message headers
+        shm->sequence = i;
+        shm->data_size = frame_size; // Latency test uses FULL 4K frame!
+        memcpy((void*)shm->data_sha256, expected_hash, 32);
+        __sync_synchronize();
+        
+        // NOW signal that data is ready - STATE CHANGE LAST!
+        // STATE: HOST_STATE_READY -> HOST_STATE_SENDING
+        set_host_state(shm, HOST_STATE_SENDING);
+        
+        // Start timer
+        uint64_t start_time = get_time_ns();
+        
+        // Wait for guest to start processing (GUEST_STATE_PROCESSING)
+        if (!wait_for_guest_state(shm, GUEST_STATE_PROCESSING, 1000000000ULL, "guest processing")) {
+            printf("  [%d] TIMEOUT (guest didn't start processing)\n", i);
+            continue;
+        }
+        
+        // Stop latency timer - this measures true latency (time to start processing)
+        uint64_t latency_end_time = get_time_ns();
+        
+        // Wait for guest to finish processing (GUEST_STATE_ACKNOWLEDGED)
+        if (!wait_for_guest_state(shm, GUEST_STATE_ACKNOWLEDGED, 1000000000ULL, "guest acknowledged")) {
+            printf("  [%d] TIMEOUT (guest didn't finish processing)\n", i);
+            // Still count the latency measurement since guest started processing
+        }
+        
+        uint64_t processing_end_time = get_time_ns();
+        
+        // Check for errors
+        if (shm->error_code != 0) {
+            printf("  [%d] ERROR: %u\n", i, shm->error_code);
+            continue;
+        }
+        
+        // Record successful measurement
+        uint64_t latency = latency_end_time - start_time;
+        uint64_t processing_time = processing_end_time - start_time;
+        
+        // Write to CSV with both latency and processing time
+        if (csv && csv->file) {
+            fprintf(csv->file, "%d,%lu,%.2f,%lu,%.2f\n", 
+                   successful, latency, latency / 1000.0, 
+                   processing_time, processing_time / 1000.0);
+        }
+        
+        total_latency += latency;
+        total_processing += processing_time;
+        successful++;
+        
+        if (latency < min_latency) min_latency = latency;
+        if (latency > max_latency) max_latency = latency;
+        
+        if (successful % 100 == 0 || iterations <= 10) {
+            printf("  [%d] Latency: %lu ns (%.2f µs), Processing: %lu ns (%.2f µs)\n", 
+                   i, latency, latency / 1000.0, processing_time, processing_time / 1000.0);
+        }
+        
+        // STATE: HOST_STATE_SENDING -> HOST_STATE_READY (ready for next message)
+        set_host_state(shm, HOST_STATE_READY);
+        
+        // Wait for guest to be ready for next message
+        if (!wait_for_guest_state(shm, GUEST_STATE_READY, 1000000000ULL, "guest ready for next")) {
+            printf("  [%d] WARNING: Guest didn't return to ready state\n", i);
+        }
+    }
+    
+    if (successful > 0) {
+        printf("\nResults:\n");
+        printf("  Successful: %d/%d\n", successful, iterations);
+        printf("  Frame size: %.2f MB (4K frame)\n", frame_size / (1024.0 * 1024.0));
+        printf("  Average latency (receive): %lu ns (%.2f µs)\n", 
+               total_latency / successful, 
+               (total_latency / successful) / 1000.0);
+        printf("  Average processing time: %lu ns (%.2f µs)\n", 
+               total_processing / successful, 
+               (total_processing / successful) / 1000.0);
+        printf("  Min latency: %lu ns (%.2f µs)\n", 
+               min_latency, min_latency / 1000.0);
+        printf("  Max latency: %lu ns (%.2f µs)\n", 
+               max_latency, max_latency / 1000.0);
+        
+        printf("\n  ✓ Data exported to latency_results.csv\n");
+    } else {
+        printf("\nNo successful measurements. Is the guest program running?\n");
+    }
+    
+    csv_close(csv);
 }
 
 void test_bandwidth(volatile struct shared_data *shm, int iterations)
@@ -215,11 +338,9 @@ void test_bandwidth(volatile struct shared_data *shm, int iterations)
         {0, 0, 0, NULL} // Sentinel
     };
     
-    // Open CSV file for results
-    FILE *csv = fopen("bandwidth_results.csv", "w");
-    if (csv) {
-        fprintf(csv, "iteration,frame_type,width,height,bpp,test_size_bytes,test_size_mb,duration_ns,duration_ms,bandwidth_mbps,bandwidth_gbps,data_verified\n");
-    }
+    // Create CSV logger
+    csv_logger_t *csv = csv_create("bandwidth_results.csv", 
+        "iteration,frame_type,width,height,bpp,test_size_bytes,test_size_mb,duration_ns,duration_ms,bandwidth_mbps,bandwidth_gbps,data_verified");
     
     for (int frame_idx = 0; test_frames[frame_idx].name != NULL; frame_idx++) {
         int width = test_frames[frame_idx].width;
@@ -240,39 +361,12 @@ void test_bandwidth(volatile struct shared_data *shm, int iterations)
         int successful_tests = 0;
         
         for (int iter = 0; iter < iterations; iter++) {
-            // Wait for guest to finish any previous processing
+            // Small delay between iterations
             if (iter > 0) {
-                printf("  Waiting for guest to be ready...");
-                fflush(stdout);
-                
-                // Wait up to 1 second for guest to be ready for next message
-                uint64_t wait_start = get_time_ns();
-                uint64_t wait_timeout = wait_start + 1000000000ULL; // 1 second
-                while (shm->guest_ack != GUEST_ACK_NONE && get_time_ns() < wait_timeout) {
-                    usleep(1000); // 1ms
-                }
-                
-                if (shm->guest_ack != GUEST_ACK_NONE) {
-                    printf(" TIMEOUT (guest not ready)\n");
-                    if (csv) {
-                        fprintf(csv, "%d,%s,%d,%d,%d,%zu,%.2f,0,0,0,0,0\n", 
-                                iter + 1, test_frames[frame_idx].name, width, height, 24,
-                                frame_size, frame_size / (1024.0 * 1024.0));
-                    }
-                    continue;
-                }
-                printf(" ready\n");
+                usleep(10000); // 10ms delay
             }
             
-            // Clear shared memory header before each iteration
-            shm->magic = 0;
-            shm->sequence = 0;
-            shm->guest_ack = GUEST_ACK_NONE;
-            shm->data_size = 0;
-            shm->signature_magic = 0;
-            shm->error_code = 0;
-            memset((void *)shm->data_sha256, 0, 32);
-            __sync_synchronize();
+            // PREPARE ALL DATA FIRST - BEFORE changing state!
             
             // Generate fresh random data for each iteration
             uint8_t *data_ptr = (uint8_t *)&shm->buffer[0];
@@ -285,14 +379,19 @@ void test_bandwidth(volatile struct shared_data *shm, int iterations)
             // Flush cache to ensure data comes from memory
             flush_cache_range((void *)data_ptr, frame_size);
             
-            // Prepare header with signature
-            shm->guest_ack = GUEST_ACK_NONE;
+            // Reset error code
+            shm->error_code = 0;
+            __sync_synchronize();
+            
+            // Prepare header
             shm->sequence = 0xFFFF + iter;  // Unique sequence for each bandwidth test
             shm->data_size = frame_size;
-            shm->signature_magic = MAGIC;
             memcpy((void *)shm->data_sha256, expected_hash, 32);
-            shm->magic = MAGIC;
             __sync_synchronize();
+            
+            // NOW signal that data is ready - STATE CHANGE LAST!
+            // STATE: HOST_STATE_READY -> HOST_STATE_SENDING
+            set_host_state(shm, HOST_STATE_SENDING);
             
             printf("  [%d] Starting transfer...", iter + 1);
             fflush(stdout);
@@ -300,41 +399,34 @@ void test_bandwidth(volatile struct shared_data *shm, int iterations)
             // Start timer AFTER data generation and cache flush
             uint64_t start_time = get_time_ns();
             
-            // Wait for guest to receive message (timeout after 1 second)
-            uint64_t timeout = start_time + 1000000000ULL; // 1 second
-            while (shm->guest_ack == GUEST_ACK_NONE) {
-                if (get_time_ns() > timeout) {
-                    printf(" TIMEOUT (message not received)\n");
-                    break;
-                }
-            }
-            
-            if (shm->guest_ack == GUEST_ACK_NONE) {
-                // Export failed result to CSV
-                if (csv) {
-                    fprintf(csv, "%d,%s,%d,%d,%d,%zu,%.2f,0,0,0,0,0\n", 
-                            iter + 1, test_frames[frame_idx].name, width, height, 24,
-                            frame_size, frame_size / (1024.0 * 1024.0));
-                }
+            // Wait for guest to start processing
+            if (!wait_for_guest_state(shm, GUEST_STATE_PROCESSING, 2000000000ULL, "guest processing")) {
+                printf(" TIMEOUT (guest didn't start processing)\n");
+                csv_write_bandwidth_result(csv, iter + 1, test_frames[frame_idx].name, 
+                                         width, height, 24, frame_size, 0, false);
                 continue;
             }
             
             printf(" received, processing...");
             fflush(stdout);
             
-            // Wait for guest to complete processing (timeout after 5 seconds)
-            timeout = get_time_ns() + 5000000000ULL; // 5 seconds
-            while (shm->guest_ack == GUEST_ACK_RECEIVED) {
-                if (get_time_ns() > timeout) {
-                    printf(" TIMEOUT (processing)\n");
-                    break;
-                }
+            // Wait for guest to finish processing
+            if (!wait_for_guest_state(shm, GUEST_STATE_ACKNOWLEDGED, 10000000000ULL, "guest acknowledged")) {
+                printf(" TIMEOUT (processing not finished)\n");
+                csv_write_bandwidth_result(csv, iter + 1, test_frames[frame_idx].name, 
+                                         width, height, 24, frame_size, 0, false);
+                continue;
             }
             
             uint64_t end_time = get_time_ns();
             
-            if (shm->guest_ack == GUEST_ACK_PROCESSED) {
-                uint64_t duration_ns = end_time - start_time;
+            // Process results
+            uint64_t duration_ns = end_time - start_time;
+            
+            // Check for errors
+            bool success = (shm->error_code == 0);
+            
+            if (success) {
                 double duration_s = duration_ns / 1e9;
                 double bandwidth_mbps = (frame_size / (1024.0 * 1024.0)) / duration_s;
                 double bandwidth_gbps = bandwidth_mbps / 1024.0;
@@ -343,29 +435,20 @@ void test_bandwidth(volatile struct shared_data *shm, int iterations)
                 successful_tests++;
                 
                 printf(" %.2f GB/s (%.2f ms)\n", bandwidth_gbps, duration_ns / 1000000.0);
-                
-                // Export to CSV
-                if (csv) {
-                    fprintf(csv, "%d,%s,%d,%d,%d,%zu,%.2f,%lu,%.2f,%.2f,%.2f,1\n", 
-                            iter + 1, test_frames[frame_idx].name, width, height, 24,
-                            frame_size, frame_size / (1024.0 * 1024.0),
-                            duration_ns, duration_ns / 1000000.0,
-                            bandwidth_mbps, bandwidth_gbps);
-                }
-            } else if (shm->guest_ack == GUEST_ACK_ERROR) {
-                printf(" FAILED (guest reported error: %u)\n", shm->error_code);
-                if (csv) {
-                    fprintf(csv, "%d,%s,%d,%d,%d,%zu,%.2f,0,0,0,0,0\n", 
-                            iter + 1, test_frames[frame_idx].name, width, height, 24,
-                            frame_size, frame_size / (1024.0 * 1024.0));
-                }
             } else {
-                printf(" TIMEOUT (processing)\n");
-                if (csv) {
-                    fprintf(csv, "%d,%s,%d,%d,%d,%zu,%.2f,0,0,0,0,0\n", 
-                            iter + 1, test_frames[frame_idx].name, width, height, 24,
-                            frame_size, frame_size / (1024.0 * 1024.0));
-                }
+                printf(" FAILED (guest reported error: %u)\n", shm->error_code);
+            }
+            
+            // Log result to CSV
+            csv_write_bandwidth_result(csv, iter + 1, test_frames[frame_idx].name, 
+                                     width, height, 24, frame_size, duration_ns, success);
+            
+            // STATE: HOST_STATE_SENDING -> HOST_STATE_READY
+            set_host_state(shm, HOST_STATE_READY);
+            
+            // Wait for guest to be ready for next message
+            if (!wait_for_guest_state(shm, GUEST_STATE_READY, 1000000000ULL, "guest ready for next")) {
+                printf("  WARNING: Guest didn't return to ready state\n");
             }
             
             // Small delay between iterations
@@ -380,14 +463,113 @@ void test_bandwidth(volatile struct shared_data *shm, int iterations)
         }
     }
     
-    if (csv) {
-        fclose(csv);
-        printf("\n  ✓ Bandwidth data exported to bandwidth_results.csv\n");
+    csv_close(csv);
+}
+
+void print_usage(const char *prog_name) {
+    printf("Usage: %s [OPTIONS]\n", prog_name);
+    printf("Options:\n");
+    printf("  -l, --latency [COUNT]     Run latency test (default: 100 messages)\n");
+    printf("  -b, --bandwidth [COUNT]   Run bandwidth test (default: 10 iterations)\n");
+    printf("  -c, --count COUNT         Number of messages/iterations\n");
+    printf("  -h, --help               Show this help\n");
+    printf("\nExamples:\n");
+    printf("  %s -l 1                  Send single latency message\n", prog_name);
+    printf("  %s -l 100                Send 100 latency messages\n", prog_name);
+    printf("  %s -b 5                  Run 5 bandwidth iterations\n", prog_name);
+    printf("  %s -l -b                 Run both tests with defaults\n", prog_name);
+}
+
+// Initialize shared memory with graceful startup handling
+void init_shared_memory(volatile struct shared_data *shm) {
+    printf("HOST: Starting initialization...\n");
+    
+    // Check if guest started first and left stale data
+    guest_state_t guest_state = get_guest_state(shm);
+    if (guest_state != GUEST_STATE_UNINITIALIZED) {
+        printf("HOST: Detected guest started first (guest state: %s), clearing stale data...\n", 
+               guest_state_name(guest_state));
+    }
+    
+    // STATE: HOST_STATE_INITIALIZING
+    // CRITICAL: Clear magic first to signal "initializing"
+    shm->magic = 0;
+    set_host_state(shm, HOST_STATE_INITIALIZING);
+    __sync_synchronize();
+    
+    // Initialize all fields to known clean state (but don't touch guest_state - that's guest's job)
+    shm->sequence = 0;
+    shm->data_size = 0;
+    shm->error_code = 0;
+    shm->test_complete = 0;
+    memset((void*)shm->data_sha256, 0, 32);
+    __sync_synchronize();
+    
+    // CRITICAL: Set magic LAST to signal "initialization complete"
+    // STATE: HOST_STATE_READY
+    shm->magic = MAGIC;
+    set_host_state(shm, HOST_STATE_READY);
+    __sync_synchronize();
+    
+    printf("HOST: Initialization complete - waiting for guest to be ready...\n");
+    
+    // Wait for guest to be ready (with timeout)
+    if (!wait_for_guest_state(shm, GUEST_STATE_READY, 10000000000ULL, "guest ready")) {
+        printf("HOST: WARNING - Guest didn't reach ready state within 10 seconds\n");
+        printf("HOST: Current guest state: %s\n", guest_state_name(get_guest_state(shm)));
+        printf("HOST: Proceeding anyway...\n");
+    } else {
+        printf("HOST: ✓ Guest is ready - synchronization complete\n");
     }
 }
 
 int main(int argc, char *argv[])
 {
+    bool run_latency = false;
+    bool run_bandwidth = false;
+    int latency_count = 100;
+    int bandwidth_count = 10;
+    
+    // Parse command line arguments
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-l") == 0 || strcmp(argv[i], "--latency") == 0) {
+            run_latency = true;
+            // Check if next argument is a number
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                latency_count = atoi(argv[++i]);
+                if (latency_count <= 0) latency_count = 1;
+            }
+        } else if (strcmp(argv[i], "-b") == 0 || strcmp(argv[i], "--bandwidth") == 0) {
+            run_bandwidth = true;
+            // Check if next argument is a number
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                bandwidth_count = atoi(argv[++i]);
+                if (bandwidth_count <= 0) bandwidth_count = 1;
+            }
+        } else if (strcmp(argv[i], "-c") == 0 || strcmp(argv[i], "--count") == 0) {
+            if (i + 1 < argc) {
+                int count = atoi(argv[++i]);
+                if (count > 0) {
+                    latency_count = count;
+                    bandwidth_count = count;
+                }
+            }
+        } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            print_usage(argv[0]);
+            return 0;
+        } else {
+            printf("Unknown option: %s\n", argv[i]);
+            print_usage(argv[0]);
+            return 1;
+        }
+    }
+    
+    // If no tests specified, run both
+    if (!run_latency && !run_bandwidth) {
+        run_latency = true;
+        run_bandwidth = true;
+    }
+    
     printf("Host Writer - ivshmem Performance Test\n");
     printf("=======================================\n\n");
     
@@ -424,20 +606,34 @@ int main(int argc, char *argv[])
     printf("Data buffer size: %zu bytes\n", 
            st.st_size - offsetof(struct shared_data, buffer));
     
+    // Initialize shared memory with custom polling protocol IMMEDIATELY
+    printf("\nInitializing shared memory protocol...\n");
+    init_shared_memory(shm);
+    printf("Shared memory initialization complete.\n");
+    printf("Guest programs can now start safely.\n");
+    
     // Wait for user
     printf("\nMake sure the guest program is running!\n");
     printf("Press Enter to start tests...\n");
     getchar();
     
     // Run tests
-    test_latency(shm, 1000);
+    if (run_latency) {
+        test_latency(shm, latency_count);
+    }
     
-    printf("\nPress Enter to run bandwidth test...\n");
-    getchar();
+    if (run_bandwidth) {
+        if (run_latency) {
+            printf("\nPress Enter to run bandwidth test...\n");
+            getchar();
+        }
+        test_bandwidth(shm, bandwidth_count);
+    }
     
-    test_bandwidth(shm, 10); // 10 iterations per frame size
-    
-    // Cleanup
+    // Signal test completion
+    set_host_state(shm, HOST_STATE_COMPLETED);
+    shm->test_complete = 1;
+    __sync_synchronize(); // Ensure completion flag is visible
     munmap(ptr, st.st_size);
     close(fd);
     

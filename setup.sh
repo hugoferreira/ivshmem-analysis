@@ -8,7 +8,7 @@
 # Needs to work on both ARM64 and x86_64 architecture. Linux only, as ivshmem is not available on macOS.
 
 # Variables
-IVSHMEM_SIZE=128
+IVSHMEM_SIZE=64
 VM_NAME="ivshmem-vm"
 VM_DISK="ivshmem-disk.qcow2"
 CLOUD_IMAGE="debian-12-generic-amd64.qcow2"
@@ -20,7 +20,7 @@ QEMU_PATH="/usr/bin/qemu-system-x86_64"
 # Detect OS
 OS=$(uname -s)
 
-# Create a IVSHMEM_SIZE shared memory file
+# Create shared memory file
 if [ "$OS" = "Darwin" ]; then
   # macOS: use local file
   dd if=/dev/zero of=$SHMEM_FILE bs=1M count=$IVSHMEM_SIZE
@@ -30,9 +30,11 @@ if [ "$OS" = "Darwin" ]; then
 else
   # Linux: use /dev/shm if available, otherwise local file
   if [ -d /dev/shm ]; then
+    echo "Creating shared memory file: /dev/shm/ivshmem (${IVSHMEM_SIZE}MB)"
     dd if=/dev/zero of=/dev/shm/ivshmem bs=1M count=$IVSHMEM_SIZE
     SHMEM_PATH=/dev/shm/ivshmem
   else
+    echo "Creating shared memory file: $SHMEM_FILE (${IVSHMEM_SIZE}MB)"
     dd if=/dev/zero of=$SHMEM_FILE bs=1M count=$IVSHMEM_SIZE
     SHMEM_PATH=$SHMEM_FILE
   fi
@@ -162,9 +164,21 @@ else
   echo ""
 fi
 
+# Check if VM is already running
+if pgrep -f "qemu-system-x86_64.*ivshmem" > /dev/null; then
+  echo "VM appears to already be running with ivshmem."
+  echo "If you want to restart it, kill the existing process first:"
+  echo "  pkill -f qemu-system-x86_64"
+  echo ""
+  echo "To run tests with the existing VM:"
+  echo "  ./run_test.sh"
+  exit 0
+fi
+
 # Launch QEMU VM with or without ivshmem Device
 if [ $HAS_IVSHMEM -eq 1 ]; then
-  # With ivshmem support
+  # With ivshmem support - shared memory will be created by run_test.sh
+  echo "Starting VM with ivshmem support..."
   $QEMU_PATH \
     -machine q35 \
     $CPU_FLAG \
@@ -179,6 +193,7 @@ if [ $HAS_IVSHMEM -eq 1 ]; then
     -nographic &
 else
   # Without ivshmem (fallback)
+  echo "Starting VM without ivshmem (limited functionality)..."
   $QEMU_PATH \
     -machine q35 \
     $CPU_FLAG \
@@ -223,12 +238,14 @@ echo ""
 echo "=========================================="
 echo "VM is ready!"
 echo "=========================================="
-echo "To connect to the VM:"
-echo "  ssh -i $CERTIFICATE_FILE -p 2222 debian@localhost"
+echo "To run performance tests:"
+echo "  ./run_test.sh"
 echo ""
-echo "The VM has build-essential and gcc pre-installed via cloud-init."
+echo "To connect to the VM manually:"
+echo "  ssh -i $CERTIFICATE_FILE -p 2222 debian@localhost"
 echo ""
 echo "To stop the VM:"
 echo "  kill $QEMU_PID"
+echo "  # or: pkill -f qemu-system-x86_64"
 echo ""
 
