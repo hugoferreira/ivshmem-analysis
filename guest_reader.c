@@ -262,61 +262,72 @@ void monitor_latency(volatile struct shared_data *shm, bool expect_latency, bool
             perf_counters_start(&perf_counters);
         }
         
-        // WARM-UP: Initial read to handle page faults and system overhead
+        // WARM-UP: Initial access to handle page faults and system overhead
         // This is not measured but prepares the system for accurate measurements
-        memcpy(measurement_buffer, data_ptr, data_size);
+        volatile uint64_t dummy_warmup = 0;
+        for (size_t i = 0; i < data_size; i += 64) {
+            dummy_warmup ^= data_ptr[i];
+        }
         __sync_synchronize();
         
-        // PHASE A: HOT CACHE READ - memcpy with data potentially in cache
+        // PHASE A: PURE READ (HOT CACHE) - Read shared memory without writing
         // After warm-up, data should be in CPU cache
-        uint64_t hot_cache_start = get_time_ns();
+        uint64_t hot_read_start = get_time_ns();
         
-        memcpy(measurement_buffer, data_ptr, data_size);
-        __sync_synchronize(); // Ensure memcpy completes
+        volatile uint64_t dummy_hot = 0;
+        for (size_t i = 0; i < data_size; i += 64) {
+            dummy_hot ^= data_ptr[i];
+        }
+        __sync_synchronize(); // Ensure reads complete
         
-        uint64_t hot_cache_end = get_time_ns();
-        uint64_t hot_cache_duration = hot_cache_end - hot_cache_start;
+        uint64_t hot_read_end = get_time_ns();
+        uint64_t hot_cache_duration = hot_read_end - hot_read_start;
         
-        // PHASE B: COLD CACHE READ - memcpy after cache flush
+        // PHASE B: PURE READ (COLD CACHE) - Read shared memory after cache flush
         // Flush cache lines for the shared memory to force memory access
         flush_cache_range(data_ptr, data_size);
         
-        uint64_t cold_cache_start = get_time_ns();
+        uint64_t cold_read_start = get_time_ns();
+        
+        volatile uint64_t dummy_cold = 0;
+        for (size_t i = 0; i < data_size; i += 64) {
+            dummy_cold ^= data_ptr[i];
+        }
+        __sync_synchronize(); // Ensure reads complete
+        
+        uint64_t cold_read_end = get_time_ns();
+        uint64_t cold_cache_duration = cold_read_end - cold_read_start;
+        
+        // PHASE C: READ+WRITE (COLD CACHE) - memcpy after cache flush to measure write overhead
+        // Flush cache again to ensure we're measuring from cold state
+        flush_cache_range(data_ptr, data_size);
+        
+        uint64_t memcpy_start = get_time_ns();
         
         memcpy(measurement_buffer, data_ptr, data_size);
         __sync_synchronize(); // Ensure memcpy completes
         
-        uint64_t cold_cache_end = get_time_ns();
-        uint64_t cold_cache_duration = cold_cache_end - cold_cache_start;
+        uint64_t memcpy_end = get_time_ns();
+        uint64_t second_pass_duration = memcpy_end - memcpy_start;
         
-        // PHASE C: SECOND PASS READ - memcpy immediately after cold cache read
-        // This should be faster as data is now in cache from Phase B
-        uint64_t second_pass_start = get_time_ns();
-        
-        memcpy(measurement_buffer, data_ptr, data_size);
-        __sync_synchronize(); // Ensure memcpy completes
-        
-        uint64_t second_pass_end = get_time_ns();
-        uint64_t second_pass_duration = second_pass_end - second_pass_start;
-        
-        // Stop performance counters after all memcpy operations
+        // Stop performance counters after all memory operations
         if (perf_available) {
-            perf_counters_stop(&perf_counters, &guest_perf_results, data_size * 4); // warmup + 3 measured operations
+            perf_counters_stop(&perf_counters, &guest_perf_results, data_size * 4); // warmup + 2 reads + 1 memcpy
         }
         
-        // Copy final data to local buffer for verification
+        // Copy final data to local buffer for verification (using the memcpy result)
         memcpy(local_buffer, measurement_buffer, data_size);
         
-        // PHASE D: CACHED VERIFY - SHA256 with data already in local cache
-        uint64_t cached_verify_start = get_time_ns();
+        // PHASE D: SHA256 INTEGRITY CHECK - SHA256 with data in local cache
+        uint64_t verify_start = get_time_ns();
         
         bool hash_match = verify_data_integrity(local_buffer, data_size, expected_hash);
         
-        uint64_t cached_verify_end = get_time_ns();
-        uint64_t cached_verify_duration = cached_verify_end - cached_verify_start;
+        uint64_t verify_end = get_time_ns();
+        uint64_t cached_verify_duration = verify_end - verify_start;
         
         // Calculate legacy timing for backward compatibility
-        uint64_t memcpy_duration = cold_cache_duration; // Use cold cache as primary measurement
+        uint64_t memcpy_duration = second_pass_duration; // Use memcpy (read+write) measurement
         uint64_t verify_duration = cached_verify_duration;
         
         // Calculate total processing duration
@@ -357,21 +368,21 @@ void monitor_latency(volatile struct shared_data *shm, bool expect_latency, bool
         __sync_synchronize();
         
         // Display results with performance metrics
-        printf("Guest Timing (measured on guest clock) - Cache Behavior Analysis:\n");
-        printf("  Phase A (Hot Cache):   %lu ns (%.2f µs) [%6.0f MB/s]\n", 
+        printf("Guest Timing (measured on guest clock) - Isolated Read/Write Analysis:\n");
+        printf("  Phase A (Pure Read Hot):   %lu ns (%.2f µs) [%6.0f MB/s] - Read shared memory (hot cache)\n", 
                hot_cache_duration, hot_cache_duration / 1000.0, 
                (data_size / (1024.0 * 1024.0)) / (hot_cache_duration / 1e9));
-        printf("  Phase B (Cold Cache):  %lu ns (%.2f µs) [%6.0f MB/s]\n", 
+        printf("  Phase B (Pure Read Cold):  %lu ns (%.2f µs) [%6.0f MB/s] - Read shared memory (cold cache)\n", 
                cold_cache_duration, cold_cache_duration / 1000.0, 
                (data_size / (1024.0 * 1024.0)) / (cold_cache_duration / 1e9));
-        printf("  Phase C (Second Pass): %lu ns (%.2f µs) [%6.0f MB/s]\n", 
+        printf("  Phase C (Read+Write):      %lu ns (%.2f µs) [%6.0f MB/s] - memcpy (read+write)\n", 
                second_pass_duration, second_pass_duration / 1000.0, 
                (data_size / (1024.0 * 1024.0)) / (second_pass_duration / 1e9));
-        printf("  Phase D (Cached Verify): %lu ns (%.2f µs) [testing only]\n", 
+        printf("  Phase D (SHA256 Verify):   %lu ns (%.2f µs) [testing only] - Integrity check\n", 
                cached_verify_duration, cached_verify_duration / 1000.0);
         
         if (perf_available) {
-            printf("    Performance (combined 3 memcpys):  L1 cache %.1f%% miss, LLC cache %.1f%% miss, TLB %.3f%% miss\n",
+            printf("    Performance (2 reads + 1 memcpy):  L1 cache %.1f%% miss, LLC cache %.1f%% miss, TLB %.3f%% miss\n",
                    guest_perf_results.l1_cache_miss_rate * 100.0,
                    guest_perf_results.llc_cache_miss_rate * 100.0,
                    guest_perf_results.tlb_miss_rate * 100.0);
@@ -381,7 +392,16 @@ void monitor_latency(volatile struct shared_data *shm, bool expect_latency, bool
                    guest_perf_results.context_switches);
         }
         
-        printf("  Legacy memcpy:         %lu ns (%.2f µs) [%6.0f MB/s] (using cold cache)\n", 
+        printf("\nAnalysis:\n");
+        printf("  Write overhead (C-B):  %+ld ns (%+.2f µs) [%+.1f%%]\n",
+               (int64_t)(second_pass_duration - cold_cache_duration),
+               (second_pass_duration - cold_cache_duration) / 1000.0,
+               ((double)(second_pass_duration - cold_cache_duration) / cold_cache_duration) * 100.0);
+        printf("  Cache effect (B-A):    %+ld ns (%+.2f µs) [%+.1f%%]\n",
+               (int64_t)(cold_cache_duration - hot_cache_duration),
+               (cold_cache_duration - hot_cache_duration) / 1000.0,
+               ((double)(cold_cache_duration - hot_cache_duration) / hot_cache_duration) * 100.0);
+        printf("  Legacy memcpy:         %lu ns (%.2f µs) [%6.0f MB/s] (Phase C)\n", 
                memcpy_duration, memcpy_duration / 1000.0, 
                (data_size / (1024.0 * 1024.0)) / (memcpy_duration / 1e9));
         printf("  Total:                 %lu ns (%.2f µs)\n", 
@@ -445,7 +465,7 @@ int main(int argc, char *argv[])
     // Parse command line arguments
     bool expect_latency = false;
     bool expect_bandwidth = false;
-    int latency_count = 100;
+    int latency_count = 1000;
     int bandwidth_count = 10;
     int custom_count = -1;
     

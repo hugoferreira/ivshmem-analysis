@@ -48,7 +48,7 @@ SHMEM_FALLBACK="./ivshmem-shmem"
 SSH_KEY="temp_id_rsa"
 SSH_OPTS="-i $SSH_KEY -p 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
 VM_USER="debian@localhost"
-LAT_COUNT=100
+LAT_COUNT=1000
 BAND_COUNT=10
 
 # CPU Pinning Configuration (inherited from setup.sh or set manually)
