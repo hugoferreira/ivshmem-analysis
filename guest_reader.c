@@ -133,7 +133,8 @@ void monitor_latency(volatile struct shared_data *shm, bool expect_latency, bool
            (expect_latency && expect_bandwidth) ? "+ " : "",
            expect_bandwidth ? "bandwidth" : "",
            expected_count);
-    printf("Will measure and report: Read time + Verify time (on guest clock)\n\n");
+    printf("Will measure: memcpy from shared memory to local buffer (actual transmission)\n");
+    printf("Plus SHA256 verification time (testing only, not real overhead)\n\n");
     fflush(stdout);
     
     int message_count = 0;
@@ -179,6 +180,15 @@ void monitor_latency(volatile struct shared_data *shm, bool expect_latency, bool
     // STATE: GUEST_STATE_WAITING_HOST_INIT -> GUEST_STATE_READY
     set_guest_state(shm, GUEST_STATE_READY);
     
+    // Allocate local buffer for memcpy (reuse for all messages)
+    // Max size for 4K frame
+    size_t max_buffer_size = 3840 * 2160 * 3;
+    uint8_t *local_buffer = malloc(max_buffer_size);
+    if (!local_buffer) {
+        printf("GUEST: ERROR - Failed to allocate local buffer\n");
+        exit(1);
+    }
+    
     while (message_count < expected_count) {
         if (shm->test_complete == 1) {
             printf("Test completion signal received. Exiting...\n");
@@ -218,25 +228,25 @@ void monitor_latency(volatile struct shared_data *shm, bool expect_latency, bool
         bool success = true;
         uint32_t error_code = 0;
         
-        // Get data pointer
+        // Get data pointer from shared memory
         uint8_t *data_ptr = (uint8_t *)&shm->buffer[0];
         
-        // MEASUREMENT 1: Read time (cache flush + buffer read) - on GUEST clock
-        uint64_t read_start = get_time_ns();
-        
-        // Flush cache to ensure we read from actual memory
+        // MEASUREMENT 1: memcpy time - THIS IS THE ACTUAL READ OVERHEAD
+        // Flush cache first to ensure we read from actual shared memory
         flush_cache_range(data_ptr, data_size);
         
-        // Force read of entire buffer
-        force_buffer_read(data_ptr, data_size);
+        uint64_t memcpy_start = get_time_ns();
         
-        uint64_t read_end = get_time_ns();
-        uint64_t read_duration = read_end - read_start;
+        memcpy(local_buffer, data_ptr, data_size);
+        __sync_synchronize(); // Ensure memcpy completes
         
-        // MEASUREMENT 2: Verification time (SHA256) - on GUEST clock
+        uint64_t memcpy_end = get_time_ns();
+        uint64_t memcpy_duration = memcpy_end - memcpy_start;
+        
+        // MEASUREMENT 2: Verification time (SHA256) - TESTING ONLY
         uint64_t verify_start = get_time_ns();
         
-        bool hash_match = verify_data_integrity(data_ptr, data_size, expected_hash);
+        bool hash_match = verify_data_integrity(local_buffer, data_size, expected_hash);
         
         uint64_t verify_end = get_time_ns();
         uint64_t verify_duration = verify_end - verify_start;
@@ -246,17 +256,17 @@ void monitor_latency(volatile struct shared_data *shm, bool expect_latency, bool
         uint64_t total_duration = processing_end - processing_start;
         
         // WRITE DURATIONS to shared memory for host to read
-        shm->timing.guest_read_duration = read_duration;
+        shm->timing.guest_copy_duration = memcpy_duration;
         shm->timing.guest_verify_duration = verify_duration;
         shm->timing.guest_total_duration = total_duration;
         __sync_synchronize();
         
         // Display results
         printf("Guest Timing (measured on guest clock):\n");
-        printf("  Read:         %lu ns (%.2f µs) [%.0f MB/s]\n", 
-               read_duration, read_duration / 1000.0, 
-               (data_size / (1024.0 * 1024.0)) / (read_duration / 1e9));
-        printf("  Verify:       %lu ns (%.2f µs)\n", 
+        printf("  memcpy:       %lu ns (%.2f µs) [%.0f MB/s]\n", 
+               memcpy_duration, memcpy_duration / 1000.0, 
+               (data_size / (1024.0 * 1024.0)) / (memcpy_duration / 1e9));
+        printf("  Verify:       %lu ns (%.2f µs) [testing only]\n", 
                verify_duration, verify_duration / 1000.0);
         printf("  Total:        %lu ns (%.2f µs)\n", 
                total_duration, total_duration / 1000.0);
@@ -268,7 +278,7 @@ void monitor_latency(volatile struct shared_data *shm, bool expect_latency, bool
             uint8_t calculated_hash[32];
             SHA256_CTX ctx;
             SHA256_Init(&ctx);
-            SHA256_Update(&ctx, data_ptr, data_size);
+            SHA256_Update(&ctx, local_buffer, data_size);
             SHA256_Final(calculated_hash, &ctx);
             print_hash_comparison(expected_hash, calculated_hash);
             success = false;
@@ -295,6 +305,8 @@ void monitor_latency(volatile struct shared_data *shm, bool expect_latency, bool
     }
     
     printf("Guest monitoring loop ended after %d messages\n", message_count);
+    
+    free(local_buffer);
 }
 
 int main(int argc, char *argv[])

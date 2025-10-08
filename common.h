@@ -36,8 +36,8 @@ typedef enum {
 // Never compare absolute timestamps across host/guest boundary.
 struct timing_data {
     // Guest-side DURATIONS (nanoseconds) - measured on guest clock
-    uint64_t guest_read_duration;    // Time to read/flush data from memory
-    uint64_t guest_verify_duration;  // Time to compute SHA256 verification
+    uint64_t guest_copy_duration;    // Time to memcpy from shared memory to local buffer
+    uint64_t guest_verify_duration;  // Time to compute SHA256 verification (testing only)
     uint64_t guest_total_duration;   // Total processing time on guest
     
     // Reserved for future use

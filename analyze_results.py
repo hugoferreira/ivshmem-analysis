@@ -139,8 +139,8 @@ def plot_latency_over_time(df, output_file='latency_over_time.png'):
     ax1.legend(loc='upper right')
     
     # Detailed timing breakdown
-    ax2.plot(df['iteration'], df['write_us'], linewidth=1, alpha=0.8, label='Host Write', color='green')
-    ax2.plot(df['iteration'], df['guest_read_us'], linewidth=1, alpha=0.8, label='Guest Read', color='blue')
+    ax2.plot(df['iteration'], df['host_memcpy_us'], linewidth=1, alpha=0.8, label='Host Memcpy', color='green')
+    ax2.plot(df['iteration'], df['guest_memcpy_us'], linewidth=1, alpha=0.8, label='Guest Memcpy', color='blue')
     ax2.plot(df['iteration'], df['guest_verify_us'], linewidth=1, alpha=0.8, label='Guest Verify', color='red')
     ax2.plot(df['iteration'], df['notification_est_us'], linewidth=1, alpha=0.8, label='Notification', color='purple')
     
@@ -185,13 +185,13 @@ def plot_percentile_chart(df, output_file='latency_percentiles.png'):
                    fontsize=9)
     
     # Component percentiles
-    write_percentiles = [df['write_us'].quantile(p/100) for p in percentiles]
-    read_percentiles = [df['guest_read_us'].quantile(p/100) for p in percentiles]
+    memcpy_percentiles = [df['host_memcpy_us'].quantile(p/100) for p in percentiles]
+    guest_memcpy_percentiles = [df['guest_memcpy_us'].quantile(p/100) for p in percentiles]
     verify_percentiles = [df['guest_verify_us'].quantile(p/100) for p in percentiles]
     notification_percentiles = [df['notification_est_us'].quantile(p/100) for p in percentiles]
     
-    ax2.plot(percentiles, write_percentiles, linewidth=2, label='Host Write', color='green')
-    ax2.plot(percentiles, read_percentiles, linewidth=2, label='Guest Read', color='blue')
+    ax2.plot(percentiles, memcpy_percentiles, linewidth=2, label='Host Memcpy', color='green')
+    ax2.plot(percentiles, guest_memcpy_percentiles, linewidth=2, label='Guest Memcpy', color='blue')
     ax2.plot(percentiles, verify_percentiles, linewidth=2, label='Guest Verify', color='red')
     ax2.plot(percentiles, notification_percentiles, linewidth=2, label='Notification', color='purple')
     
@@ -235,26 +235,26 @@ def analyze_bandwidth_by_frame_type(bandwidth_df):
                     'std': frame_data['total_mbps'].std() / 1000,
                 },
                 'write_bandwidth_gbps': {
-                    'min': frame_data['write_mbps'].min() / 1000,
-                    'max': frame_data['write_mbps'].max() / 1000,
-                    'mean': frame_data['write_mbps'].mean() / 1000,
-                    'median': frame_data['write_mbps'].median() / 1000,
-                    'std': frame_data['write_mbps'].std() / 1000,
+                    'min': frame_data['host_memcpy_mbps'].min() / 1000,
+                    'max': frame_data['host_memcpy_mbps'].max() / 1000,
+                    'mean': frame_data['host_memcpy_mbps'].mean() / 1000,
+                    'median': frame_data['host_memcpy_mbps'].median() / 1000,
+                    'std': frame_data['host_memcpy_mbps'].std() / 1000,
                 },
                 'read_bandwidth_gbps': {
-                    'min': frame_data['read_mbps'].min() / 1000,
-                    'max': frame_data['read_mbps'].max() / 1000,
-                    'mean': frame_data['read_mbps'].mean() / 1000,
-                    'median': frame_data['read_mbps'].median() / 1000,
-                    'std': frame_data['read_mbps'].std() / 1000,
+                    'min': frame_data['guest_memcpy_mbps'].min() / 1000,
+                    'max': frame_data['guest_memcpy_mbps'].max() / 1000,
+                    'mean': frame_data['guest_memcpy_mbps'].mean() / 1000,
+                    'median': frame_data['guest_memcpy_mbps'].median() / 1000,
+                    'std': frame_data['guest_memcpy_mbps'].std() / 1000,
                 },
                 'timings_ms': {
-                    'write': {
-                        'min': frame_data['write_ms'].min(),
-                        'max': frame_data['write_ms'].max(),
-                        'mean': frame_data['write_ms'].mean(),
-                        'median': frame_data['write_ms'].median(),
-                        'std': frame_data['write_ms'].std(),
+                    'host_memcpy': {
+                        'min': frame_data['host_memcpy_ms'].min(),
+                        'max': frame_data['host_memcpy_ms'].max(),
+                        'mean': frame_data['host_memcpy_ms'].mean(),
+                        'median': frame_data['host_memcpy_ms'].median(),
+                        'std': frame_data['host_memcpy_ms'].std(),
                     },
                     'roundtrip': {
                         'min': frame_data['roundtrip_ms'].min(),
@@ -263,12 +263,12 @@ def analyze_bandwidth_by_frame_type(bandwidth_df):
                         'median': frame_data['roundtrip_ms'].median(),
                         'std': frame_data['roundtrip_ms'].std(),
                     },
-                    'guest_read': {
-                        'min': frame_data['guest_read_ms'].min(),
-                        'max': frame_data['guest_read_ms'].max(),
-                        'mean': frame_data['guest_read_ms'].mean(),
-                        'median': frame_data['guest_read_ms'].median(),
-                        'std': frame_data['guest_read_ms'].std(),
+                    'guest_memcpy': {
+                        'min': frame_data['guest_memcpy_ms'].min(),
+                        'max': frame_data['guest_memcpy_ms'].max(),
+                        'mean': frame_data['guest_memcpy_ms'].mean(),
+                        'median': frame_data['guest_memcpy_ms'].median(),
+                        'std': frame_data['guest_memcpy_ms'].std(),
                     },
                     'guest_verify': {
                         'min': frame_data['guest_verify_ms'].min(),
@@ -316,12 +316,12 @@ def plot_bandwidth_analysis(bandwidth_df, output_file='bandwidth_analysis.png'):
     x = np.arange(len(frame_types))
     width = 0.25
     
-    write_means = [successful_df[successful_df['frame_type'] == ft]['write_mbps'].mean() / 1000 for ft in frame_types]
-    read_means = [successful_df[successful_df['frame_type'] == ft]['read_mbps'].mean() / 1000 for ft in frame_types]
+    write_means = [successful_df[successful_df['frame_type'] == ft]['host_memcpy_mbps'].mean() / 1000 for ft in frame_types]
+    read_means = [successful_df[successful_df['frame_type'] == ft]['guest_memcpy_mbps'].mean() / 1000 for ft in frame_types]
     total_means = [successful_df[successful_df['frame_type'] == ft]['total_mbps'].mean() / 1000 for ft in frame_types]
     
-    ax2.bar(x - width, write_means, width, label='Write Bandwidth', alpha=0.8, color='green')
-    ax2.bar(x, read_means, width, label='Read Bandwidth', alpha=0.8, color='blue')
+    ax2.bar(x - width, write_means, width, label='Host Memcpy Bandwidth', alpha=0.8, color='green')
+    ax2.bar(x, read_means, width, label='Guest Memcpy Bandwidth', alpha=0.8, color='blue')
     ax2.bar(x + width, total_means, width, label='Total Bandwidth', alpha=0.8, color='red')
     
     ax2.set_xlabel('Frame Type', fontsize=12)
@@ -333,13 +333,13 @@ def plot_bandwidth_analysis(bandwidth_df, output_file='bandwidth_analysis.png'):
     ax2.grid(True, alpha=0.3, axis='y')
     
     # 3. Timing Components Breakdown
-    timing_components = ['write_ms', 'guest_read_ms', 'guest_verify_ms']
+    timing_components = ['host_memcpy_ms', 'guest_memcpy_ms', 'guest_verify_ms']
     colors = ['green', 'blue', 'red']
     
     bottom = np.zeros(len(frame_types))
     for i, component in enumerate(timing_components):
         means = [successful_df[successful_df['frame_type'] == ft][component].mean() for ft in frame_types]
-        ax3.bar(frame_types, means, bottom=bottom, label=component.replace('_ms', '').replace('_', ' ').title(), 
+        ax3.bar(frame_types, means, bottom=bottom, label=component.replace('_ms', '').replace('_', ' ').replace('memcpy', 'Memcpy').title(), 
                 alpha=0.8, color=colors[i])
         bottom += means
     
@@ -417,8 +417,8 @@ def generate_report(latency_df, bandwidth_df, output_file='performance_report.tx
             # Add detailed component breakdown
             f.write("Latency Components Breakdown (microseconds):\n")
             components = {
-                'Host Write': 'write_us',
-                'Guest Read': 'guest_read_us', 
+                'Host Memcpy': 'host_memcpy_us',
+                'Guest Memcpy': 'guest_memcpy_us', 
                 'Guest Verify': 'guest_verify_us',
                 'Notification (est)': 'notification_est_us'
             }
@@ -449,15 +449,15 @@ def generate_report(latency_df, bandwidth_df, output_file='performance_report.tx
                     f.write(f"    Mean:               {stats['total_bandwidth_gbps']['mean']:>12.2f} GB/s\n")
                     f.write(f"    Median:             {stats['total_bandwidth_gbps']['median']:>12.2f} GB/s\n")
                     f.write(f"    Std Dev:            {stats['total_bandwidth_gbps']['std']:>12.2f} GB/s\n")
-                    f.write(f"  Write Bandwidth (GB/s):\n")
+                    f.write(f"  Host Memcpy Bandwidth (GB/s):\n")
                     f.write(f"    Mean:               {stats['write_bandwidth_gbps']['mean']:>12.2f} GB/s\n")
                     f.write(f"    Median:             {stats['write_bandwidth_gbps']['median']:>12.2f} GB/s\n")
-                    f.write(f"  Read Bandwidth (GB/s):\n")
+                    f.write(f"  Guest Memcpy Bandwidth (GB/s):\n")
                     f.write(f"    Mean:               {stats['read_bandwidth_gbps']['mean']:>12.2f} GB/s\n")
                     f.write(f"    Median:             {stats['read_bandwidth_gbps']['median']:>12.2f} GB/s\n")
                     f.write(f"  Timing Breakdown (ms):\n")
-                    f.write(f"    Write:              {stats['timings_ms']['write']['mean']:>12.2f} ms\n")
-                    f.write(f"    Guest Read:         {stats['timings_ms']['guest_read']['mean']:>12.2f} ms\n")
+                    f.write(f"    Host Memcpy:        {stats['timings_ms']['host_memcpy']['mean']:>12.2f} ms\n")
+                    f.write(f"    Guest Memcpy:       {stats['timings_ms']['guest_memcpy']['mean']:>12.2f} ms\n")
                     f.write(f"    Guest Verify:       {stats['timings_ms']['guest_verify']['mean']:>12.2f} ms\n")
                     f.write(f"    Total:              {stats['timings_ms']['total']['mean']:>12.2f} ms\n")
                 
@@ -468,9 +468,9 @@ def generate_report(latency_df, bandwidth_df, output_file='performance_report.tx
                 f.write(f"  Successful:           {len(successful_df)} ({len(successful_df)/len(bandwidth_df)*100:.1f}%)\n")
                 f.write(f"  Peak total bandwidth: {successful_df['total_mbps'].max() / 1000:.2f} GB/s\n")
                 f.write(f"  Average total bandwidth: {successful_df['total_mbps'].mean() / 1000:.2f} GB/s\n")
-                f.write(f"  Peak write bandwidth: {successful_df['write_mbps'].max() / 1000:.2f} GB/s\n")
-                f.write(f"  Peak read bandwidth:  {successful_df['read_mbps'].max() / 1000:.2f} GB/s\n")
-                f.write(f"  Fastest write:        {successful_df['write_ms'].min():.2f} ms\n")
+                f.write(f"  Peak host memcpy bandwidth: {successful_df['host_memcpy_mbps'].max() / 1000:.2f} GB/s\n")
+                f.write(f"  Peak guest memcpy bandwidth: {successful_df['guest_memcpy_mbps'].max() / 1000:.2f} GB/s\n")
+                f.write(f"  Fastest host memcpy:  {successful_df['host_memcpy_ms'].min():.2f} ms\n")
                 f.write(f"  Fastest total transfer: {successful_df['total_ms'].min():.2f} ms\n")
                 f.write(f"  Slowest total transfer: {successful_df['total_ms'].max():.2f} ms\n")
                 
@@ -479,8 +479,8 @@ def generate_report(latency_df, bandwidth_df, output_file='performance_report.tx
                 f.write(f"  - First iteration often slower due to cache warming\n")
                 f.write(f"  - Actual memory bandwidth typically ~25-50 GB/s for modern systems\n")
                 f.write(f"  - SHA256 verification ensures data integrity across all transfers\n")
-                f.write(f"  - Write/Read bandwidths are calculated based on individual operation times\n")
-                f.write(f"  - Total bandwidth includes all operations (write + read + verify)\n")
+                f.write(f"  - Host/Guest memcpy bandwidths are calculated based on individual operation times\n")
+                f.write(f"  - Total bandwidth includes all operations (host memcpy + guest memcpy + verify)\n")
         
         f.write("\n" + "="*70 + "\n")
     
@@ -514,8 +514,8 @@ def main():
     print("-"*50)
     
     components = {
-        'Host Write': 'write_us',
-        'Guest Read': 'guest_read_us', 
+        'Host Memcpy': 'host_memcpy_us',
+        'Guest Memcpy': 'guest_memcpy_us', 
         'Guest Verify': 'guest_verify_us',
         'Notification (est)': 'notification_est_us'
     }
@@ -546,10 +546,10 @@ def main():
                 print(f"  Total Bandwidth (GB/s): {stats['total_bandwidth_gbps']['mean']:>8.2f} ± {stats['total_bandwidth_gbps']['std']:>6.2f}")
                 print(f"    Range:              {stats['total_bandwidth_gbps']['min']:>8.2f} - {stats['total_bandwidth_gbps']['max']:>8.2f}")
                 print(f"  Write Bandwidth (GB/s): {stats['write_bandwidth_gbps']['mean']:>8.2f} ± {stats['write_bandwidth_gbps']['std']:>6.2f}")
-                print(f"  Read Bandwidth (GB/s):  {stats['read_bandwidth_gbps']['mean']:>8.2f} ± {stats['read_bandwidth_gbps']['std']:>6.2f}")
+                print(f"  Memcpy Bandwidth (GB/s): {stats['read_bandwidth_gbps']['mean']:>8.2f} ± {stats['read_bandwidth_gbps']['std']:>6.2f}")
                 print(f"  Timing Breakdown (ms):")
-                print(f"    Write:              {stats['timings_ms']['write']['mean']:>8.2f} ± {stats['timings_ms']['write']['std']:>6.2f}")
-                print(f"    Guest Read:         {stats['timings_ms']['guest_read']['mean']:>8.2f} ± {stats['timings_ms']['guest_read']['std']:>6.2f}")
+                print(f"    Host Memcpy:        {stats['timings_ms']['host_memcpy']['mean']:>8.2f} ± {stats['timings_ms']['host_memcpy']['std']:>6.2f}")
+                print(f"    Guest Memcpy:       {stats['timings_ms']['guest_memcpy']['mean']:>8.2f} ± {stats['timings_ms']['guest_memcpy']['std']:>6.2f}")
                 print(f"    Guest Verify:       {stats['timings_ms']['guest_verify']['mean']:>8.2f} ± {stats['timings_ms']['guest_verify']['std']:>6.2f}")
                 print(f"    Total:              {stats['timings_ms']['total']['mean']:>8.2f} ± {stats['timings_ms']['total']['std']:>6.2f}")
             
@@ -560,9 +560,9 @@ def main():
             print(f"  Successful:           {len(successful_df)} ({len(successful_df)/len(bandwidth_df)*100:.1f}%)")
             print(f"  Peak total bandwidth: {successful_df['total_mbps'].max() / 1000:.2f} GB/s")
             print(f"  Average total bandwidth: {successful_df['total_mbps'].mean() / 1000:.2f} GB/s")
-            print(f"  Peak write bandwidth: {successful_df['write_mbps'].max() / 1000:.2f} GB/s")
-            print(f"  Peak read bandwidth:  {successful_df['read_mbps'].max() / 1000:.2f} GB/s")
-            print(f"  Fastest write:        {successful_df['write_ms'].min():.2f} ms")
+            print(f"  Peak host memcpy bandwidth: {successful_df['host_memcpy_mbps'].max() / 1000:.2f} GB/s")
+            print(f"  Peak guest memcpy bandwidth: {successful_df['guest_memcpy_mbps'].max() / 1000:.2f} GB/s")
+            print(f"  Fastest host memcpy:  {successful_df['host_memcpy_ms'].min():.2f} ms")
             print(f"  Fastest total:        {successful_df['total_ms'].min():.2f} ms")
     
     # Generate plots
