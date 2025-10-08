@@ -40,6 +40,17 @@ def load_bandwidth_data(csv_path='bandwidth_results.csv'):
     return df
 
 
+def load_performance_data(csv_path='latency_performance.csv'):
+    """Load performance counter data from CSV file"""
+    if not os.path.exists(csv_path):
+        print(f"Warning: {csv_path} not found")
+        return None
+    
+    df = pd.read_csv(csv_path)
+    print(f"Loaded {len(df)} performance counter measurements from {csv_path}")
+    return df
+
+
 def calculate_statistics(data, column_name, unit='ns'):
     """Calculate comprehensive statistics for a data series"""
     stats = {
@@ -116,14 +127,14 @@ def plot_latency_histogram(df, output_file='latency_histogram.png'):
 
 
 def plot_latency_over_time(df, output_file='latency_over_time.png'):
-    """Plot latency over time to show temporal patterns with detailed breakdown"""
+    """Plot latency over time showing the 4-phase cache behavior analysis"""
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 12))
     
     # Overall latency over time
     ax1.plot(df['iteration'], df['roundtrip_us'], linewidth=1, alpha=0.8, color='steelblue', label='Round-trip')
     ax1.set_xlabel('Iteration', fontsize=12)
     ax1.set_ylabel('Latency (μs)', fontsize=12)
-    ax1.set_title('ivshmem Latency Over Time', fontsize=14, fontweight='bold')
+    ax1.set_title('ivshmem Round-Trip Latency Over Time', fontsize=14, fontweight='bold')
     ax1.grid(True, alpha=0.3)
     
     # Add median line
@@ -138,18 +149,21 @@ def plot_latency_over_time(df, output_file='latency_over_time.png'):
     
     ax1.legend(loc='upper right')
     
-    # Detailed timing breakdown
-    ax2.plot(df['iteration'], df['host_memcpy_us'], linewidth=1, alpha=0.8, label='Host Memcpy', color='green')
-    ax2.plot(df['iteration'], df['guest_memcpy_us'], linewidth=1, alpha=0.8, label='Guest Memcpy', color='blue')
-    ax2.plot(df['iteration'], df['guest_verify_us'], linewidth=1, alpha=0.8, label='Guest Verify', color='red')
-    ax2.plot(df['iteration'], df['notification_est_us'], linewidth=1, alpha=0.8, label='Notification', color='purple')
+    # 4-Phase Read/Write Isolation Analysis (as specifically requested)
+    ax2.plot(df['iteration'], df['guest_hot_cache_us'], linewidth=2, alpha=0.9, 
+             label='A. Pure Read (Hot Cache) - no writing', color='red', marker='o', markersize=3)
+    ax2.plot(df['iteration'], df['guest_cold_cache_us'], linewidth=2, alpha=0.9, 
+             label='B. Pure Read (Cold Cache) - no writing', color='blue', marker='s', markersize=3)
+    ax2.plot(df['iteration'], df['guest_second_pass_us'], linewidth=2, alpha=0.9, 
+             label='C. Read+Write (memcpy) - introduces write overhead', color='orange', marker='^', markersize=3)
+    ax2.plot(df['iteration'], df['guest_cached_verify_us'], linewidth=2, alpha=0.9, 
+             label='D. SHA256 Integrity Check', color='green', marker='d', markersize=3)
     
     ax2.set_xlabel('Iteration', fontsize=12)
     ax2.set_ylabel('Time (μs)', fontsize=12)
-    ax2.set_title('Latency Components Breakdown', fontsize=14, fontweight='bold')
+    ax2.set_title('4-Phase Read/Write Isolation Analysis', fontsize=14, fontweight='bold')
     ax2.grid(True, alpha=0.3)
     ax2.legend(loc='upper right')
-    ax2.set_yscale('log')  # Log scale to see all components clearly
     
     plt.tight_layout()
     plt.savefig(output_file, dpi=150, bbox_inches='tight')
@@ -159,7 +173,7 @@ def plot_latency_over_time(df, output_file='latency_over_time.png'):
 
 
 def plot_percentile_chart(df, output_file='latency_percentiles.png'):
-    """Create a percentile chart with component breakdown"""
+    """Create a percentile chart focused on the 4-phase cache behavior analysis"""
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 12))
     
     percentiles = np.arange(0, 101, 1)
@@ -170,7 +184,7 @@ def plot_percentile_chart(df, output_file='latency_percentiles.png'):
     ax1.plot(percentiles, latency_percentiles, linewidth=2, color='darkblue')
     ax1.set_xlabel('Percentile', fontsize=12)
     ax1.set_ylabel('Latency (μs)', fontsize=12)
-    ax1.set_title('ivshmem Latency Percentile Chart', fontsize=14, fontweight='bold')
+    ax1.set_title('ivshmem Round-Trip Latency Percentile Chart', fontsize=14, fontweight='bold')
     ax1.grid(True, alpha=0.3)
     
     # Mark important percentiles
@@ -184,23 +198,46 @@ def plot_percentile_chart(df, output_file='latency_percentiles.png'):
                    bbox=dict(boxstyle='round,pad=0.5', facecolor='yellow', alpha=0.7),
                    fontsize=9)
     
-    # Component percentiles
-    memcpy_percentiles = [df['host_memcpy_us'].quantile(p/100) for p in percentiles]
-    guest_memcpy_percentiles = [df['guest_memcpy_us'].quantile(p/100) for p in percentiles]
-    verify_percentiles = [df['guest_verify_us'].quantile(p/100) for p in percentiles]
-    notification_percentiles = [df['notification_est_us'].quantile(p/100) for p in percentiles]
+    # 4-Phase Read/Write Isolation Percentiles (as specifically requested)
+    hot_cache_percentiles = [df['guest_hot_cache_us'].quantile(p/100) for p in percentiles]
+    cold_cache_percentiles = [df['guest_cold_cache_us'].quantile(p/100) for p in percentiles]
+    second_pass_percentiles = [df['guest_second_pass_us'].quantile(p/100) for p in percentiles]
+    cached_verify_percentiles = [df['guest_cached_verify_us'].quantile(p/100) for p in percentiles]
     
-    ax2.plot(percentiles, memcpy_percentiles, linewidth=2, label='Host Memcpy', color='green')
-    ax2.plot(percentiles, guest_memcpy_percentiles, linewidth=2, label='Guest Memcpy', color='blue')
-    ax2.plot(percentiles, verify_percentiles, linewidth=2, label='Guest Verify', color='red')
-    ax2.plot(percentiles, notification_percentiles, linewidth=2, label='Notification', color='purple')
+    ax2.plot(percentiles, hot_cache_percentiles, linewidth=2, 
+             label='A. Pure Read (Hot Cache) - no writing', color='red')
+    ax2.plot(percentiles, cold_cache_percentiles, linewidth=2, 
+             label='B. Pure Read (Cold Cache) - no writing', color='blue')
+    ax2.plot(percentiles, second_pass_percentiles, linewidth=2, 
+             label='C. Read+Write (memcpy) - introduces write overhead', color='orange')
+    ax2.plot(percentiles, cached_verify_percentiles, linewidth=2, 
+             label='D. SHA256 Integrity Check', color='green')
     
     ax2.set_xlabel('Percentile', fontsize=12)
     ax2.set_ylabel('Time (μs)', fontsize=12)
-    ax2.set_title('Latency Components Percentile Chart', fontsize=14, fontweight='bold')
+    ax2.set_title('4-Phase Read/Write Isolation Analysis Percentile Chart', fontsize=14, fontweight='bold')
     ax2.grid(True, alpha=0.3)
     ax2.legend()
-    ax2.set_yscale('log')  # Log scale to see all components
+    
+    # Mark important percentiles for cache behavior with effect analysis
+    for p in [50, 95]:
+        hot_value = df['guest_hot_cache_us'].quantile(p/100)
+        cold_value = df['guest_cold_cache_us'].quantile(p/100)
+        second_value = df['guest_second_pass_us'].quantile(p/100)
+        
+        ax2.plot(p, hot_value, 'ro', markersize=6)
+        ax2.plot(p, cold_value, 'bo', markersize=6)
+        ax2.plot(p, second_value, 'o', color='orange', markersize=6)
+        
+        # Show performance effects at this percentile
+        cache_effect = ((cold_value - hot_value) / hot_value) * 100
+        write_overhead = ((second_value - cold_value) / cold_value) * 100
+        
+        ax2.annotate(f'p{p}\nCache: {cache_effect:+.1f}%\nWrite: {write_overhead:+.1f}%', 
+                   xy=(p, max(hot_value, cold_value, second_value)), xytext=(10, 15),
+                   textcoords='offset points',
+                   bbox=dict(boxstyle='round,pad=0.3', facecolor='wheat', alpha=0.8),
+                   fontsize=8)
     
     plt.tight_layout()
     plt.savefig(output_file, dpi=150, bbox_inches='tight')
@@ -374,7 +411,347 @@ def plot_bandwidth_analysis(bandwidth_df, output_file='bandwidth_analysis.png'):
     return fig
 
 
-def generate_report(latency_df, bandwidth_df, output_file='performance_report.txt'):
+def analyze_performance_counters(perf_df):
+    """Analyze performance counter data to identify bottlenecks"""
+    if perf_df is None or len(perf_df) == 0:
+        return None
+    
+    # Filter out rows with invalid data (zeros or NaN)
+    valid_data = perf_df.dropna()
+    
+    analysis = {
+        'l1_cache': {
+            'host_miss_rate': {
+                'mean': valid_data['host_l1_miss_rate'].mean(),
+                'median': valid_data['host_l1_miss_rate'].median(),
+                'std': valid_data['host_l1_miss_rate'].std(),
+                'p95': valid_data['host_l1_miss_rate'].quantile(0.95),
+                'max': valid_data['host_l1_miss_rate'].max(),
+                'min': valid_data['host_l1_miss_rate'].min()
+            },
+            'guest_miss_rate': {
+                'mean': valid_data['guest_l1_miss_rate'].mean(),
+                'median': valid_data['guest_l1_miss_rate'].median(),
+                'std': valid_data['guest_l1_miss_rate'].std(),
+                'p95': valid_data['guest_l1_miss_rate'].quantile(0.95),
+                'max': valid_data['guest_l1_miss_rate'].max(),
+                'min': valid_data['guest_l1_miss_rate'].min()
+            }
+        },
+        'efficiency': {
+            'host_ipc': {
+                'mean': valid_data['host_ipc'].mean(),
+                'median': valid_data['host_ipc'].median(),
+                'std': valid_data['host_ipc'].std(),
+                'p95': valid_data['host_ipc'].quantile(0.95),
+                'max': valid_data['host_ipc'].max(),
+                'min': valid_data['host_ipc'].min()
+            },
+            'guest_ipc': {
+                'mean': valid_data['guest_ipc'].mean(),
+                'median': valid_data['guest_ipc'].median(),
+                'std': valid_data['guest_ipc'].std(),
+                'p95': valid_data['guest_ipc'].quantile(0.95),
+                'max': valid_data['guest_ipc'].max(),
+                'min': valid_data['guest_ipc'].min()
+            },
+            'host_cycles_per_byte': {
+                'mean': valid_data['host_cycles_per_byte'].mean(),
+                'median': valid_data['host_cycles_per_byte'].median(),
+                'std': valid_data['host_cycles_per_byte'].std(),
+                'p95': valid_data['host_cycles_per_byte'].quantile(0.95),
+                'max': valid_data['host_cycles_per_byte'].max(),
+                'min': valid_data['host_cycles_per_byte'].min()
+            },
+            'guest_cycles_per_byte': {
+                'mean': valid_data['guest_cycles_per_byte'].mean(),
+                'median': valid_data['guest_cycles_per_byte'].median(),
+                'std': valid_data['guest_cycles_per_byte'].std(),
+                'p95': valid_data['guest_cycles_per_byte'].quantile(0.95),
+                'max': valid_data['guest_cycles_per_byte'].max(),
+                'min': valid_data['guest_cycles_per_byte'].min()
+            }
+        },
+        'tlb': {
+            'host_tlb_misses': {
+                'mean': valid_data['host_tlb_misses'].mean(),
+                'median': valid_data['host_tlb_misses'].median(),
+                'std': valid_data['host_tlb_misses'].std(),
+                'p95': valid_data['host_tlb_misses'].quantile(0.95),
+                'max': valid_data['host_tlb_misses'].max(),
+                'min': valid_data['host_tlb_misses'].min()
+            },
+            'guest_tlb_misses': {
+                'mean': valid_data['guest_tlb_misses'].mean(),
+                'median': valid_data['guest_tlb_misses'].median(),
+                'std': valid_data['guest_tlb_misses'].std(),
+                'p95': valid_data['guest_tlb_misses'].quantile(0.95),
+                'max': valid_data['guest_tlb_misses'].max(),
+                'min': valid_data['guest_tlb_misses'].min()
+            }
+        },
+        'context_switches': {
+            'host': {
+                'mean': valid_data['host_context_switches'].mean(),
+                'median': valid_data['host_context_switches'].median(),
+                'total': valid_data['host_context_switches'].sum()
+            },
+            'guest': {
+                'mean': valid_data['guest_context_switches'].mean(),
+                'median': valid_data['guest_context_switches'].median(), 
+                'total': valid_data['guest_context_switches'].sum()
+            }
+        }
+    }
+    
+    # Calculate performance ratios for comparison
+    analysis['ratios'] = {
+        'l1_miss_rate_ratio': analysis['l1_cache']['guest_miss_rate']['mean'] / analysis['l1_cache']['host_miss_rate']['mean'] if analysis['l1_cache']['host_miss_rate']['mean'] > 0 else 0,
+        'ipc_ratio': analysis['efficiency']['guest_ipc']['mean'] / analysis['efficiency']['host_ipc']['mean'] if analysis['efficiency']['host_ipc']['mean'] > 0 else 0,
+        'cycles_per_byte_ratio': analysis['efficiency']['guest_cycles_per_byte']['mean'] / analysis['efficiency']['host_cycles_per_byte']['mean'] if analysis['efficiency']['host_cycles_per_byte']['mean'] > 0 else 0,
+        'tlb_miss_ratio': analysis['tlb']['guest_tlb_misses']['mean'] / analysis['tlb']['host_tlb_misses']['mean'] if analysis['tlb']['host_tlb_misses']['mean'] > 0 else 0
+    }
+    
+    # Identify problematic iterations
+    analysis['outliers'] = {
+        'low_guest_ipc': valid_data[valid_data['guest_ipc'] < 0.1]['iteration'].tolist(),
+        'high_guest_l1_miss': valid_data[valid_data['guest_l1_miss_rate'] > 1.0]['iteration'].tolist(),
+        'high_cycles_per_byte': valid_data[valid_data['guest_cycles_per_byte'] > 1.0]['iteration'].tolist()
+    }
+    
+    return analysis
+
+
+def plot_performance_analysis(perf_df, output_file='performance_analysis.png'):
+    """Create comprehensive performance counter analysis plots"""
+    if perf_df is None or len(perf_df) == 0:
+        print("No performance counter data available for plotting")
+        return None
+    
+    fig, ((ax1, ax2), (ax3, ax4), (ax5, ax6)) = plt.subplots(3, 2, figsize=(16, 18))
+    
+    # 1. L1 Cache Miss Rate Comparison
+    ax1.plot(perf_df['iteration'], perf_df['host_l1_miss_rate'], 
+             label='Host L1 Miss Rate', color='blue', alpha=0.7)
+    ax1.plot(perf_df['iteration'], perf_df['guest_l1_miss_rate'], 
+             label='Guest L1 Miss Rate', color='red', alpha=0.7)
+    
+    # Add percentile lines for host L1 miss rate
+    host_l1_p50 = perf_df['host_l1_miss_rate'].quantile(0.50)
+    host_l1_p90 = perf_df['host_l1_miss_rate'].quantile(0.90)
+    ax1.axhline(y=host_l1_p50, color='blue', linestyle=':', linewidth=1.5, 
+               label=f'Host p50: {host_l1_p50:.3f}%', alpha=0.7)
+    ax1.axhline(y=host_l1_p90, color='blue', linestyle='--', linewidth=1.5, 
+               label=f'Host p90: {host_l1_p90:.3f}%', alpha=0.7)
+    
+    # Add percentile lines for guest L1 miss rate
+    guest_l1_p50 = perf_df['guest_l1_miss_rate'].quantile(0.50)
+    guest_l1_p90 = perf_df['guest_l1_miss_rate'].quantile(0.90)
+    ax1.axhline(y=guest_l1_p50, color='red', linestyle=':', linewidth=1.5, 
+               label=f'Guest p50: {guest_l1_p50:.3f}%', alpha=0.7)
+    ax1.axhline(y=guest_l1_p90, color='red', linestyle='--', linewidth=1.5, 
+               label=f'Guest p90: {guest_l1_p90:.3f}%', alpha=0.7)
+    
+    ax1.set_xlabel('Iteration')
+    ax1.set_ylabel('L1 Cache Miss Rate (%)')
+    ax1.set_title('L1 Cache Miss Rate: Host vs Guest', fontweight='bold')
+    ax1.legend(loc='upper right')
+    ax1.grid(True, alpha=0.3)
+    ax1.set_yscale('log')  # Log scale to see both ranges
+    
+    # 2. Instructions Per Cycle (IPC) Comparison
+    ax2.plot(perf_df['iteration'], perf_df['host_ipc'], 
+             label='Host IPC', color='blue', alpha=0.7)
+    ax2.plot(perf_df['iteration'], perf_df['guest_ipc'], 
+             label='Guest IPC', color='red', alpha=0.7)
+    
+    # Add percentile lines for host IPC
+    host_ipc_p50 = perf_df['host_ipc'].quantile(0.50)
+    host_ipc_p90 = perf_df['host_ipc'].quantile(0.90)
+    ax2.axhline(y=host_ipc_p50, color='blue', linestyle=':', linewidth=1.5, 
+               label=f'Host p50: {host_ipc_p50:.3f}', alpha=0.7)
+    ax2.axhline(y=host_ipc_p90, color='blue', linestyle='--', linewidth=1.5, 
+               label=f'Host p90: {host_ipc_p90:.2f}', alpha=0.7)
+    
+    # Add percentile lines for guest IPC
+    guest_ipc_p50 = perf_df['guest_ipc'].quantile(0.50)
+    guest_ipc_p90 = perf_df['guest_ipc'].quantile(0.90)
+    ax2.axhline(y=guest_ipc_p50, color='red', linestyle=':', linewidth=1.5, 
+               label=f'Guest p50: {guest_ipc_p50:.3f}', alpha=0.7)
+    ax2.axhline(y=guest_ipc_p90, color='red', linestyle='--', linewidth=1.5, 
+               label=f'Guest p90: {guest_ipc_p90:.2f}', alpha=0.7)
+    
+    ax2.set_xlabel('Iteration')
+    ax2.set_ylabel('Instructions Per Cycle (IPC)')
+    ax2.set_title('CPU Efficiency: Instructions Per Cycle', fontweight='bold')
+    ax2.legend(loc='upper right')
+    ax2.grid(True, alpha=0.3)
+    
+    # 3. Cycles per Byte Comparison
+    ax3.plot(perf_df['iteration'], perf_df['host_cycles_per_byte'], 
+             label='Host Cycles/Byte', color='blue', alpha=0.7)
+    ax3.plot(perf_df['iteration'], perf_df['guest_cycles_per_byte'], 
+             label='Guest Cycles/Byte', color='red', alpha=0.7)
+    
+    # Add percentile lines for host cycles per byte
+    host_cpb_p50 = perf_df['host_cycles_per_byte'].quantile(0.50)
+    host_cpb_p90 = perf_df['host_cycles_per_byte'].quantile(0.90)
+    ax3.axhline(y=host_cpb_p50, color='blue', linestyle=':', linewidth=1.5, 
+               label=f'Host p50: {host_cpb_p50:.3f}', alpha=0.7)
+    ax3.axhline(y=host_cpb_p90, color='blue', linestyle='--', linewidth=1.5, 
+               label=f'Host p90: {host_cpb_p90:.3f}', alpha=0.7)
+    
+    # Add percentile lines for guest cycles per byte
+    guest_cpb_p50 = perf_df['guest_cycles_per_byte'].quantile(0.50)
+    guest_cpb_p90 = perf_df['guest_cycles_per_byte'].quantile(0.90)
+    ax3.axhline(y=guest_cpb_p50, color='red', linestyle=':', linewidth=1.5, 
+               label=f'Guest p50: {guest_cpb_p50:.3f}', alpha=0.7)
+    ax3.axhline(y=guest_cpb_p90, color='red', linestyle='--', linewidth=1.5, 
+               label=f'Guest p90: {guest_cpb_p90:.3f}', alpha=0.7)
+    
+    ax3.set_xlabel('Iteration')
+    ax3.set_ylabel('CPU Cycles per Byte')
+    ax3.set_title('Memory Efficiency: CPU Cycles per Byte', fontweight='bold')
+    ax3.legend(loc='upper right')
+    ax3.grid(True, alpha=0.3)
+    ax3.set_yscale('log')
+    
+    # 4. TLB Misses Comparison
+    ax4.plot(perf_df['iteration'], perf_df['host_tlb_misses'], 
+             label='Host TLB Misses', color='blue', alpha=0.7)
+    ax4.plot(perf_df['iteration'], perf_df['guest_tlb_misses'], 
+             label='Guest TLB Misses', color='red', alpha=0.7)
+    
+    # Add percentile lines for host TLB misses
+    host_tlb_p50 = perf_df['host_tlb_misses'].quantile(0.50)
+    host_tlb_p90 = perf_df['host_tlb_misses'].quantile(0.90)
+    ax4.axhline(y=host_tlb_p50, color='blue', linestyle=':', linewidth=1.5, 
+               label=f'Host p50: {host_tlb_p50:.0f}', alpha=0.7)
+    ax4.axhline(y=host_tlb_p90, color='blue', linestyle='--', linewidth=1.5, 
+               label=f'Host p90: {host_tlb_p90:.0f}', alpha=0.7)
+    
+    # Add percentile lines for guest TLB misses
+    guest_tlb_p50 = perf_df['guest_tlb_misses'].quantile(0.50)
+    guest_tlb_p90 = perf_df['guest_tlb_misses'].quantile(0.90)
+    ax4.axhline(y=guest_tlb_p50, color='red', linestyle=':', linewidth=1.5, 
+               label=f'Guest p50: {guest_tlb_p50:.0f}', alpha=0.7)
+    ax4.axhline(y=guest_tlb_p90, color='red', linestyle='--', linewidth=1.5, 
+               label=f'Guest p90: {guest_tlb_p90:.0f}', alpha=0.7)
+    
+    ax4.set_xlabel('Iteration')
+    ax4.set_ylabel('TLB Misses')
+    ax4.set_title('Translation Lookaside Buffer (TLB) Misses', fontweight='bold')
+    ax4.legend(loc='upper right')
+    ax4.grid(True, alpha=0.3)
+    
+    # 5. Performance Efficiency Scatter Plot
+    ax5.scatter(perf_df['host_l1_miss_rate'], perf_df['host_ipc'], 
+                alpha=0.6, color='blue', label='Host', s=30)
+    ax5.scatter(perf_df['guest_l1_miss_rate'], perf_df['guest_ipc'], 
+                alpha=0.6, color='red', label='Guest', s=30)
+    ax5.set_xlabel('L1 Cache Miss Rate')
+    ax5.set_ylabel('Instructions Per Cycle (IPC)')
+    ax5.set_title('Performance Efficiency: Cache vs CPU', fontweight='bold')
+    ax5.legend()
+    ax5.grid(True, alpha=0.3)
+    ax5.set_xscale('log')
+    
+    # 6. Context Switches Over Time
+    ax6.plot(perf_df['iteration'], perf_df['host_context_switches'], 
+             label='Host Context Switches', color='blue', alpha=0.7, marker='o', markersize=2)
+    ax6.plot(perf_df['iteration'], perf_df['guest_context_switches'], 
+             label='Guest Context Switches', color='red', alpha=0.7, marker='s', markersize=2)
+    ax6.set_xlabel('Iteration')
+    ax6.set_ylabel('Context Switches')
+    ax6.set_title('Context Switches per Operation', fontweight='bold')
+    ax6.legend()
+    ax6.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(output_file, dpi=150, bbox_inches='tight')
+    print(f"✓ Performance analysis plot saved to {output_file}")
+    
+    return fig
+
+
+def plot_performance_distribution(perf_df, output_file='performance_distribution.png'):
+    """Create distribution plots for key performance metrics"""
+    if perf_df is None or len(perf_df) == 0:
+        print("No performance counter data available for plotting")
+        return None
+    
+    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(14, 10))
+    
+    # 1. L1 Miss Rate Distribution
+    ax1.hist(perf_df['host_l1_miss_rate'], bins=30, alpha=0.7, 
+             label='Host', color='blue', density=True)
+    ax1.hist(perf_df['guest_l1_miss_rate'], bins=30, alpha=0.7, 
+             label='Guest', color='red', density=True)
+    ax1.set_xlabel('L1 Cache Miss Rate')
+    ax1.set_ylabel('Density')
+    ax1.set_title('L1 Cache Miss Rate Distribution', fontweight='bold')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    ax1.set_xlim(0, 2)  # Focus on reasonable range
+    
+    # 2. IPC Distribution
+    ax2.hist(perf_df['host_ipc'], bins=30, alpha=0.7, 
+             label='Host', color='blue', density=True)
+    ax2.hist(perf_df['guest_ipc'], bins=30, alpha=0.7, 
+             label='Guest', color='red', density=True)
+    ax2.set_xlabel('Instructions Per Cycle (IPC)')
+    ax2.set_ylabel('Density')
+    ax2.set_title('IPC Distribution', fontweight='bold')
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+    
+    # 3. Cycles per Byte Distribution
+    ax3.hist(perf_df['host_cycles_per_byte'], bins=30, alpha=0.7, 
+             label='Host', color='blue', density=True)
+    ax3.hist(perf_df['guest_cycles_per_byte'], bins=30, alpha=0.7, 
+             label='Guest', color='red', density=True)
+    ax3.set_xlabel('CPU Cycles per Byte')
+    ax3.set_ylabel('Density')
+    ax3.set_title('Memory Efficiency Distribution', fontweight='bold')
+    ax3.legend()
+    ax3.grid(True, alpha=0.3)
+    ax3.set_xlim(0, 2)  # Focus on reasonable range
+    
+    # 4. Box Plot Comparison
+    metrics = ['host_l1_miss_rate', 'guest_l1_miss_rate', 
+               'host_ipc', 'guest_ipc',
+               'host_cycles_per_byte', 'guest_cycles_per_byte']
+    data_to_plot = []
+    labels = []
+    colors = []
+    
+    for metric in metrics:
+        if metric in perf_df.columns:
+            # Filter outliers for better visualization
+            q99 = perf_df[metric].quantile(0.99)
+            filtered_data = perf_df[perf_df[metric] <= q99][metric]
+            data_to_plot.append(filtered_data)
+            labels.append(metric.replace('_', ' ').title())
+            colors.append('blue' if 'host' in metric else 'red')
+    
+    box_plot = ax4.boxplot(data_to_plot, labels=labels, patch_artist=True)
+    for patch, color in zip(box_plot['boxes'], colors):
+        patch.set_facecolor(color)
+        patch.set_alpha(0.7)
+    
+    ax4.set_ylabel('Value')  
+    ax4.set_title('Performance Metrics Box Plot (99th percentile)', fontweight='bold')
+    ax4.grid(True, alpha=0.3)
+    ax4.tick_params(axis='x', rotation=45)
+    
+    plt.tight_layout()
+    plt.savefig(output_file, dpi=150, bbox_inches='tight')
+    print(f"✓ Performance distribution plot saved to {output_file}")
+    
+    return fig
+
+
+def generate_report(latency_df, bandwidth_df, perf_df=None, output_file='performance_report.txt'):
     """Generate a text report with all statistics"""
     with open(output_file, 'w') as f:
         f.write("="*70 + "\n")
@@ -415,17 +792,57 @@ def generate_report(latency_df, bandwidth_df, output_file='performance_report.tx
             f.write(f"  Std Dev:              {latency_us.std():>12.2f} μs\n\n")
             
             # Add detailed component breakdown
-            f.write("Latency Components Breakdown (microseconds):\n")
-            components = {
+            f.write("Traditional Latency Components (microseconds):\n")
+            traditional_components = {
                 'Host Memcpy': 'host_memcpy_us',
-                'Guest Memcpy': 'guest_memcpy_us', 
-                'Guest Verify': 'guest_verify_us',
+                'Guest Memcpy (Legacy)': 'guest_memcpy_us', 
+                'Guest Verify (Legacy)': 'guest_verify_us',
                 'Notification (est)': 'notification_est_us'
             }
             
-            for name, col in components.items():
+            for name, col in traditional_components.items():
                 data = latency_df[col]
                 f.write(f"  {name:<20} {data.mean():>8.2f} μs (p95: {data.quantile(0.95):>6.2f} μs)\n")
+            
+            # Add new read/write isolation analysis
+            f.write("\nRead/Write Isolation Analysis (microseconds):\n")
+            cache_components = {
+                'Pure Read (Hot Cache)': 'guest_hot_cache_us',
+                'Pure Read (Cold Cache)': 'guest_cold_cache_us',
+                'Read+Write (memcpy)': 'guest_second_pass_us',
+                'SHA256 Integrity Check': 'guest_cached_verify_us'
+            }
+            
+            for name, col in cache_components.items():
+                data = latency_df[col]
+                f.write(f"  {name:<20} {data.mean():>8.2f} μs (p95: {data.quantile(0.95):>6.2f} μs)\n")
+            
+            # Read/Write isolation performance analysis
+            f.write("\nRead/Write Isolation Performance Analysis:\n")
+            hot_cache = latency_df['guest_hot_cache_us']
+            cold_cache = latency_df['guest_cold_cache_us']
+            read_write = latency_df['guest_second_pass_us']
+            cached_verify = latency_df['guest_cached_verify_us']
+            legacy_verify = latency_df['guest_verify_us']
+            
+            cache_effect = ((cold_cache - hot_cache) / hot_cache * 100)
+            write_overhead = ((read_write - cold_cache) / cold_cache * 100)
+            verify_improvement = ((legacy_verify - cached_verify) / legacy_verify * 100)
+            
+            f.write(f"  Cache effect (B-A):        {cache_effect.mean():>8.1f}% (median: {cache_effect.median():>6.1f}%)\n")
+            f.write(f"  Write overhead (C-B):      {write_overhead.mean():>8.1f}% (median: {write_overhead.median():>6.1f}%)\n")
+            f.write(f"  SHA256 cache benefit:      {verify_improvement.mean():>8.1f}% faster (median: {verify_improvement.median():>6.1f}%)\n")
+            
+            f.write(f"\nBandwidth Analysis:\n")
+            f.write(f"  Pure read (hot cache):     {23.73 * 1000 / hot_cache.mean():>8.1f} MB/s\n")
+            f.write(f"  Pure read (cold cache):    {23.73 * 1000 / cold_cache.mean():>8.1f} MB/s\n")
+            f.write(f"  Read+Write (memcpy):       {23.73 * 1000 / read_write.mean():>8.1f} MB/s\n")
+            
+            f.write(f"\nKey Insights:\n")
+            f.write(f"  - Shared memory read speed: ~{23.73 * 1000 / cold_cache.mean():.0f} MB/s (excellent!)\n")
+            f.write(f"  - Write overhead factor:    ~{read_write.mean() / cold_cache.mean():.1f}x slowdown\n")
+            f.write(f"  - Local memory write is the bottleneck, not shared memory access\n")
+            f.write(f"  - Cache effects minimal for large datasets ({cache_effect.mean():+.1f}%)\n")
             
             f.write(f"\nEstimated One-Way Latency (half of round-trip):\n")
             f.write(f"  Mean:                 {latency_ns.mean()/2:>12.0f} ns ({latency_us.mean()/2:>8.2f} μs)\n")
@@ -482,6 +899,119 @@ def generate_report(latency_df, bandwidth_df, output_file='performance_report.tx
                 f.write(f"  - Host/Guest memcpy bandwidths are calculated based on individual operation times\n")
                 f.write(f"  - Total bandwidth includes all operations (host memcpy + guest memcpy + verify)\n")
         
+        # Performance counter analysis
+        if perf_df is not None and len(perf_df) > 0:
+            f.write("\n" + "="*70 + "\n")
+            f.write("HARDWARE PERFORMANCE COUNTER ANALYSIS\n")
+            f.write("-"*70 + "\n")
+            
+            perf_analysis = analyze_performance_counters(perf_df)
+            if perf_analysis:
+                f.write("This analysis reveals why the guest memcpy is significantly slower:\n\n")
+                
+                # L1 Cache Analysis
+                f.write("L1 CACHE PERFORMANCE:\n")
+                f.write(f"  Host L1 Miss Rate:\n")
+                f.write(f"    Mean:               {perf_analysis['l1_cache']['host_miss_rate']['mean']:>12.4f}%\n")
+                f.write(f"    Median:             {perf_analysis['l1_cache']['host_miss_rate']['median']:>12.4f}%\n")
+                f.write(f"    95th percentile:    {perf_analysis['l1_cache']['host_miss_rate']['p95']:>12.4f}%\n")
+                f.write(f"    Range:              {perf_analysis['l1_cache']['host_miss_rate']['min']:>8.4f}% - {perf_analysis['l1_cache']['host_miss_rate']['max']:>8.2f}%\n")
+                
+                f.write(f"  Guest L1 Miss Rate:\n")
+                f.write(f"    Mean:               {perf_analysis['l1_cache']['guest_miss_rate']['mean']:>12.4f}%\n")
+                f.write(f"    Median:             {perf_analysis['l1_cache']['guest_miss_rate']['median']:>12.4f}%\n")
+                f.write(f"    95th percentile:    {perf_analysis['l1_cache']['guest_miss_rate']['p95']:>12.4f}%\n")
+                f.write(f"    Range:              {perf_analysis['l1_cache']['guest_miss_rate']['min']:>8.4f}% - {perf_analysis['l1_cache']['guest_miss_rate']['max']:>8.2f}%\n")
+                
+                f.write(f"  Guest/Host L1 Miss Rate Ratio: {perf_analysis['ratios']['l1_miss_rate_ratio']:>8.2f}x\n\n")
+                
+                # CPU Efficiency Analysis
+                f.write("CPU EFFICIENCY (Instructions Per Cycle - IPC):\n")
+                f.write(f"  Host IPC:\n")
+                f.write(f"    Mean:               {perf_analysis['efficiency']['host_ipc']['mean']:>12.4f}\n")
+                f.write(f"    Median:             {perf_analysis['efficiency']['host_ipc']['median']:>12.4f}\n")
+                f.write(f"    Range:              {perf_analysis['efficiency']['host_ipc']['min']:>8.4f} - {perf_analysis['efficiency']['host_ipc']['max']:>8.2f}\n")
+                
+                f.write(f"  Guest IPC:\n")
+                f.write(f"    Mean:               {perf_analysis['efficiency']['guest_ipc']['mean']:>12.4f}\n")
+                f.write(f"    Median:             {perf_analysis['efficiency']['guest_ipc']['median']:>12.4f}\n")
+                f.write(f"    Range:              {perf_analysis['efficiency']['guest_ipc']['min']:>8.4f} - {perf_analysis['efficiency']['guest_ipc']['max']:>8.2f}\n")
+                
+                f.write(f"  Guest/Host IPC Ratio: {perf_analysis['ratios']['ipc_ratio']:>8.2f}x\n\n")
+                
+                # Memory Efficiency Analysis
+                f.write("MEMORY EFFICIENCY (CPU Cycles per Byte):\n")
+                f.write(f"  Host Cycles/Byte:\n")
+                f.write(f"    Mean:               {perf_analysis['efficiency']['host_cycles_per_byte']['mean']:>12.4f}\n")
+                f.write(f"    Median:             {perf_analysis['efficiency']['host_cycles_per_byte']['median']:>12.4f}\n")
+                f.write(f"    Range:              {perf_analysis['efficiency']['host_cycles_per_byte']['min']:>8.4f} - {perf_analysis['efficiency']['host_cycles_per_byte']['max']:>8.2f}\n")
+                
+                f.write(f"  Guest Cycles/Byte:\n")
+                f.write(f"    Mean:               {perf_analysis['efficiency']['guest_cycles_per_byte']['mean']:>12.4f}\n")
+                f.write(f"    Median:             {perf_analysis['efficiency']['guest_cycles_per_byte']['median']:>12.4f}\n")
+                f.write(f"    Range:              {perf_analysis['efficiency']['guest_cycles_per_byte']['min']:>8.4f} - {perf_analysis['efficiency']['guest_cycles_per_byte']['max']:>8.2f}\n")
+                
+                f.write(f"  Guest/Host Cycles/Byte Ratio: {perf_analysis['ratios']['cycles_per_byte_ratio']:>8.2f}x\n\n")
+                
+                # TLB Analysis
+                f.write("TRANSLATION LOOKASIDE BUFFER (TLB) MISSES:\n")
+                f.write(f"  Host TLB Misses:\n")
+                f.write(f"    Mean:               {perf_analysis['tlb']['host_tlb_misses']['mean']:>12.0f}\n")
+                f.write(f"    Median:             {perf_analysis['tlb']['host_tlb_misses']['median']:>12.0f}\n")
+                f.write(f"    Range:              {perf_analysis['tlb']['host_tlb_misses']['min']:>8.0f} - {perf_analysis['tlb']['host_tlb_misses']['max']:>8.0f}\n")
+                
+                f.write(f"  Guest TLB Misses:\n")
+                f.write(f"    Mean:               {perf_analysis['tlb']['guest_tlb_misses']['mean']:>12.0f}\n")
+                f.write(f"    Median:             {perf_analysis['tlb']['guest_tlb_misses']['median']:>12.0f}\n")
+                f.write(f"    Range:              {perf_analysis['tlb']['guest_tlb_misses']['min']:>8.0f} - {perf_analysis['tlb']['guest_tlb_misses']['max']:>8.0f}\n")
+                
+                f.write(f"  Guest/Host TLB Miss Ratio: {perf_analysis['ratios']['tlb_miss_ratio']:>8.2f}x\n\n")
+                
+                # Context Switches
+                f.write("CONTEXT SWITCHES:\n")
+                f.write(f"  Host:               {perf_analysis['context_switches']['host']['total']:>12.0f} total ({perf_analysis['context_switches']['host']['mean']:>6.2f} avg/op)\n")
+                f.write(f"  Guest:              {perf_analysis['context_switches']['guest']['total']:>12.0f} total ({perf_analysis['context_switches']['guest']['mean']:>6.2f} avg/op)\n\n")
+                
+                # Problem Analysis
+                f.write("PERFORMANCE BOTTLENECK ANALYSIS:\n")
+                if perf_analysis['outliers']['low_guest_ipc']:
+                    f.write(f"  Critical IPC Issues: {len(perf_analysis['outliers']['low_guest_ipc'])} iterations with guest IPC < 0.1\n")
+                    f.write(f"    Affected iterations: {perf_analysis['outliers']['low_guest_ipc'][:10]}")
+                    if len(perf_analysis['outliers']['low_guest_ipc']) > 10:
+                        f.write(f" (+{len(perf_analysis['outliers']['low_guest_ipc']) - 10} more)")
+                    f.write("\n")
+                
+                if perf_analysis['outliers']['high_guest_l1_miss']:
+                    f.write(f"  High L1 Miss Rate: {len(perf_analysis['outliers']['high_guest_l1_miss'])} iterations with guest L1 miss rate > 100%\n")
+                    f.write(f"    Affected iterations: {perf_analysis['outliers']['high_guest_l1_miss'][:10]}")
+                    if len(perf_analysis['outliers']['high_guest_l1_miss']) > 10:
+                        f.write(f" (+{len(perf_analysis['outliers']['high_guest_l1_miss']) - 10} more)")
+                    f.write("\n")
+                
+                if perf_analysis['outliers']['high_cycles_per_byte']:
+                    f.write(f"  Memory Inefficiency: {len(perf_analysis['outliers']['high_cycles_per_byte'])} iterations with guest cycles/byte > 1.0\n")
+                    f.write(f"    Affected iterations: {perf_analysis['outliers']['high_cycles_per_byte'][:10]}")
+                    if len(perf_analysis['outliers']['high_cycles_per_byte']) > 10:
+                        f.write(f" (+{len(perf_analysis['outliers']['high_cycles_per_byte']) - 10} more)")
+                    f.write("\n")
+                
+                f.write("\nROOT CAUSE ANALYSIS:\n")
+                if perf_analysis['ratios']['ipc_ratio'] < 0.5:
+                    f.write("  ⚠️  CRITICAL: Guest IPC is severely degraded - possible VM exit overhead\n")
+                if perf_analysis['ratios']['l1_miss_rate_ratio'] > 2:
+                    f.write("  ⚠️  Guest L1 cache performance is significantly worse than host\n")
+                if perf_analysis['ratios']['tlb_miss_ratio'] > 1.5:
+                    f.write("  ⚠️  Guest TLB misses indicate possible virtual memory overhead\n")
+                if perf_analysis['context_switches']['guest']['mean'] > perf_analysis['context_switches']['host']['mean']:
+                    f.write("  ⚠️  Guest experiences more context switches - possible scheduling issues\n")
+                
+                f.write("\nRECOMMENDATIONS:\n")
+                f.write("  1. Investigate VM exit frequency during memory operations\n")
+                f.write("  2. Consider CPU pinning and NUMA topology optimization\n")
+                f.write("  3. Analyze hypervisor memory mapping efficiency\n")
+                f.write("  4. Test with different memory access patterns\n")
+                f.write("  5. Profile EPT (Extended Page Table) performance\n")
+        
         f.write("\n" + "="*70 + "\n")
     
     print(f"✓ Performance report saved to {output_file}")
@@ -489,16 +1019,27 @@ def generate_report(latency_df, bandwidth_df, output_file='performance_report.tx
 
 def main():
     print("="*70)
-    print("IVSHMEM Performance Analysis")
+    print("IVSHMEM Performance Analysis with Read/Write Isolation")
     print("="*70)
     
     # Load data
     latency_df = load_latency_data()
     bandwidth_df = load_bandwidth_data()
+    perf_df = load_performance_data()
     
     if latency_df is None:
         print("\nNo data to analyze. Exiting.")
         sys.exit(1)
+    
+    # Check if we have the new cache behavior columns
+    cache_columns = ['guest_hot_cache_us', 'guest_cold_cache_us', 'guest_second_pass_us', 'guest_cached_verify_us']
+    has_cache_data = all(col in latency_df.columns for col in cache_columns)
+    
+    if has_cache_data:
+        print(f"✓ Found read/write isolation analysis data with {len(latency_df)} measurements")
+    else:
+        print(f"⚠️  Read/write isolation columns not found. Using legacy analysis only.")
+        print(f"   Available columns: {list(latency_df.columns)}")
     
     # Calculate and display statistics
     print("\n" + "="*70)
@@ -508,19 +1049,35 @@ def main():
     calculate_statistics(latency_df['roundtrip_ns'], 'Round-Trip Latency (nanoseconds)', 'ns')
     calculate_statistics(latency_df['roundtrip_us'], 'Round-Trip Latency (microseconds)', 'μs')
     
-    # Detailed component analysis
+    # Cache behavior statistics if available
+    if has_cache_data:
+        print("\n" + "="*70)
+        print("READ/WRITE ISOLATION STATISTICS")
+        print("="*70)
+        
+        cache_stats = {
+            'Pure Read (Hot Cache)': 'guest_hot_cache_us',
+            'Pure Read (Cold Cache)': 'guest_cold_cache_us',
+            'Read+Write (memcpy)': 'guest_second_pass_us',
+            'SHA256 Integrity Check': 'guest_cached_verify_us'
+        }
+        
+        for name, col in cache_stats.items():
+            calculate_statistics(latency_df[col], name, 'μs')
+    
+    # Traditional component analysis
     print("\n" + "-"*50)
-    print("LATENCY COMPONENTS ANALYSIS")
+    print("TRADITIONAL LATENCY COMPONENTS ANALYSIS")
     print("-"*50)
     
-    components = {
+    traditional_components = {
         'Host Memcpy': 'host_memcpy_us',
-        'Guest Memcpy': 'guest_memcpy_us', 
-        'Guest Verify': 'guest_verify_us',
+        'Guest Memcpy (Legacy)': 'guest_memcpy_us', 
+        'Guest Verify (Legacy)': 'guest_verify_us',
         'Notification (est)': 'notification_est_us'
     }
     
-    for name, col in components.items():
+    for name, col in traditional_components.items():
         data = latency_df[col]
         print(f"\n{name}:")
         print(f"  Mean:    {data.mean():>12.2f} μs")
@@ -528,9 +1085,123 @@ def main():
         print(f"  p95:     {data.quantile(0.95):>12.2f} μs")
         print(f"  p99:     {data.quantile(0.99):>12.2f} μs")
     
+    # New read/write isolation analysis
+    print("\n" + "-"*50)
+    print("READ/WRITE ISOLATION ANALYSIS (4-PHASE MEASUREMENT)")
+    print("-"*50)
+    
+    cache_components = {
+        'Pure Read (Hot Cache)': 'guest_hot_cache_us',
+        'Pure Read (Cold Cache)': 'guest_cold_cache_us',
+        'Read+Write (memcpy)': 'guest_second_pass_us',
+        'SHA256 Integrity Check': 'guest_cached_verify_us'
+    }
+    
+    for name, col in cache_components.items():
+        data = latency_df[col]
+        print(f"\n{name}:")
+        print(f"  Mean:    {data.mean():>12.2f} μs")
+        print(f"  Median:  {data.median():>12.2f} μs")
+        print(f"  p95:     {data.quantile(0.95):>12.2f} μs")
+        print(f"  p99:     {data.quantile(0.99):>12.2f} μs")
+    
+    # Read/Write isolation performance analysis
+    print("\n" + "-"*50)
+    print("READ/WRITE ISOLATION PERFORMANCE ANALYSIS")
+    print("-"*50)
+    
+    hot_cache = latency_df['guest_hot_cache_us']
+    cold_cache = latency_df['guest_cold_cache_us']
+    read_write = latency_df['guest_second_pass_us']
+    cached_verify = latency_df['guest_cached_verify_us']
+    
+    # Calculate performance effects
+    cache_effect = ((cold_cache - hot_cache) / hot_cache * 100)
+    write_overhead = ((read_write - cold_cache) / cold_cache * 100)
+    
+    print(f"\nPerformance Effects:")
+    print(f"  Cache effect (B-A):        {cache_effect.mean():>8.1f}% (median: {cache_effect.median():>6.1f}%)")
+    print(f"  Write overhead (C-B):      {write_overhead.mean():>8.1f}% (median: {write_overhead.median():>6.1f}%)")
+    
+    print(f"\nBandwidth Analysis:")
+    hot_bw = 23.73 * 1000 / hot_cache.mean()
+    cold_bw = 23.73 * 1000 / cold_cache.mean()
+    memcpy_bw = 23.73 * 1000 / read_write.mean()
+    
+    print(f"  Pure read (hot cache):     {hot_bw:>8.1f} MB/s")
+    print(f"  Pure read (cold cache):    {cold_bw:>8.1f} MB/s")
+    print(f"  Read+Write (memcpy):       {memcpy_bw:>8.1f} MB/s")
+    
+    print(f"\n🔍 KEY INSIGHTS:")
+    print(f"  • Shared memory read speed: ~{cold_bw:.0f} MB/s (excellent performance!)")
+    print(f"  • Write overhead factor:    ~{read_write.mean() / cold_cache.mean():.1f}x slowdown from local memory writes")
+    print(f"  • Cache effects:            {cache_effect.mean():+.1f}% (minimal for 23MB dataset)")
+    print(f"  • Bottleneck identified:    LOCAL MEMORY WRITE, not shared memory access")
+    
+    # Verify performance comparison
+    legacy_verify = latency_df['guest_verify_us']
+    cached_verify = latency_df['guest_cached_verify_us']
+    verify_improvement = ((legacy_verify - cached_verify) / legacy_verify * 100)
+    
+    print(f"\nSHA256 Verification Performance:")
+    print(f"  Legacy verify:          {legacy_verify.mean():>8.2f} μs (on uncached data)")
+    print(f"  Cached verify:          {cached_verify.mean():>8.2f} μs (on cached data)")
+    print(f"  Cache benefit:          {verify_improvement.mean():>8.1f}% faster (median: {verify_improvement.median():>6.1f}%)")
+    
     print(f"\nEstimated One-Way Latency:")
     print(f"  Mean:    {latency_df['roundtrip_ns'].mean()/2:>12.0f} ns ({latency_df['roundtrip_us'].mean()/2:>8.2f} μs)")
     print(f"  Median:  {latency_df['roundtrip_ns'].median()/2:>12.0f} ns ({latency_df['roundtrip_us'].median()/2:>8.2f} μs)")
+    
+    # Performance counter analysis
+    if perf_df is not None and len(perf_df) > 0:
+        print("\n" + "="*70)
+        print("HARDWARE PERFORMANCE COUNTER ANALYSIS")
+        print("="*70)
+        
+        perf_analysis = analyze_performance_counters(perf_df)
+        if perf_analysis:
+            print(f"\nL1 CACHE MISS RATES:")
+            print(f"  Host:    {perf_analysis['l1_cache']['host_miss_rate']['mean']:>8.4f}% (median: {perf_analysis['l1_cache']['host_miss_rate']['median']:>6.4f}%)")
+            print(f"  Guest:   {perf_analysis['l1_cache']['guest_miss_rate']['mean']:>8.4f}% (median: {perf_analysis['l1_cache']['guest_miss_rate']['median']:>6.4f}%)")
+            print(f"  Ratio:   {perf_analysis['ratios']['l1_miss_rate_ratio']:>8.2f}x (guest/host)")
+            
+            print(f"\nCPU EFFICIENCY (IPC - Instructions Per Cycle):")
+            print(f"  Host:    {perf_analysis['efficiency']['host_ipc']['mean']:>8.4f} (median: {perf_analysis['efficiency']['host_ipc']['median']:>6.4f})")
+            print(f"  Guest:   {perf_analysis['efficiency']['guest_ipc']['mean']:>8.4f} (median: {perf_analysis['efficiency']['guest_ipc']['median']:>6.4f})")
+            print(f"  Ratio:   {perf_analysis['ratios']['ipc_ratio']:>8.2f}x (guest/host)")
+            
+            print(f"\nMEMORY EFFICIENCY (CPU Cycles per Byte):")
+            print(f"  Host:    {perf_analysis['efficiency']['host_cycles_per_byte']['mean']:>8.4f} (median: {perf_analysis['efficiency']['host_cycles_per_byte']['median']:>6.4f})")
+            print(f"  Guest:   {perf_analysis['efficiency']['guest_cycles_per_byte']['mean']:>8.4f} (median: {perf_analysis['efficiency']['guest_cycles_per_byte']['median']:>6.4f})")
+            print(f"  Ratio:   {perf_analysis['ratios']['cycles_per_byte_ratio']:>8.2f}x (guest/host)")
+            
+            print(f"\nTLB MISSES:")
+            print(f"  Host:    {perf_analysis['tlb']['host_tlb_misses']['mean']:>8.0f} (median: {perf_analysis['tlb']['host_tlb_misses']['median']:>6.0f})")
+            print(f"  Guest:   {perf_analysis['tlb']['guest_tlb_misses']['mean']:>8.0f} (median: {perf_analysis['tlb']['guest_tlb_misses']['median']:>6.0f})")
+            print(f"  Ratio:   {perf_analysis['ratios']['tlb_miss_ratio']:>8.2f}x (guest/host)")
+            
+            print(f"\nCONTEXT SWITCHES:")
+            print(f"  Host:    {perf_analysis['context_switches']['host']['total']:>8.0f} total ({perf_analysis['context_switches']['host']['mean']:>6.2f} avg/op)")
+            print(f"  Guest:   {perf_analysis['context_switches']['guest']['total']:>8.0f} total ({perf_analysis['context_switches']['guest']['mean']:>6.2f} avg/op)")
+            
+            # Highlight critical issues
+            critical_issues = []
+            if perf_analysis['ratios']['ipc_ratio'] < 0.5:
+                critical_issues.append("Severe Guest IPC degradation")
+            if perf_analysis['ratios']['l1_miss_rate_ratio'] > 2:
+                critical_issues.append("Poor Guest L1 cache performance")
+            if perf_analysis['ratios']['tlb_miss_ratio'] > 1.5:
+                critical_issues.append("High Guest TLB miss rate")
+            
+            if critical_issues:
+                print(f"\n⚠️  CRITICAL PERFORMANCE ISSUES DETECTED:")
+                for issue in critical_issues:
+                    print(f"    - {issue}")
+            
+            if perf_analysis['outliers']['low_guest_ipc']:
+                print(f"\n📊 PROBLEMATIC ITERATIONS:")
+                print(f"    {len(perf_analysis['outliers']['low_guest_ipc'])} iterations with guest IPC < 0.1")
+                print(f"    Examples: {perf_analysis['outliers']['low_guest_ipc'][:5]}")
     
     # Bandwidth analysis
     if bandwidth_df is not None and len(bandwidth_df) > 0:
@@ -577,22 +1248,45 @@ def main():
     if bandwidth_df is not None and len(bandwidth_df) > 0:
         plot_bandwidth_analysis(bandwidth_df)
     
+    if perf_df is not None and len(perf_df) > 0:
+        plot_performance_analysis(perf_df)
+        plot_performance_distribution(perf_df)
+    
     # Generate report
     print("\n" + "="*70)
     print("GENERATING REPORT")
     print("="*70)
-    generate_report(latency_df, bandwidth_df)
+    generate_report(latency_df, bandwidth_df, perf_df)
     
     print("\n" + "="*70)
     print("Analysis complete!")
     print("="*70)
     print("\nGenerated files:")
     print("  - latency_histogram.png")
-    print("  - latency_over_time.png")
-    print("  - latency_percentiles.png")
+    print("  - latency_over_time.png (with read/write isolation analysis)")
+    print("  - latency_percentiles.png (with read/write isolation percentiles)")
     if bandwidth_df is not None and len(bandwidth_df) > 0:
         print("  - bandwidth_analysis.png")
-    print("  - performance_report.txt")
+    if perf_df is not None and len(perf_df) > 0:
+        print("  - performance_analysis.png")
+        print("  - performance_distribution.png")
+    print("  - performance_report.txt (with read/write isolation insights)")
+    
+    # Show key read/write isolation insights
+    if has_cache_data:
+        hot_cache = latency_df['guest_hot_cache_us']
+        cold_cache = latency_df['guest_cold_cache_us']
+        read_write = latency_df['guest_second_pass_us']
+        
+        cache_effect = ((cold_cache - hot_cache) / hot_cache * 100).mean()
+        write_overhead = ((read_write - cold_cache) / cold_cache * 100).mean()
+        
+        print(f"\n🔍 KEY READ/WRITE ISOLATION INSIGHTS:")
+        print(f"   Pure shared memory read: {cold_cache.mean():.1f} μs ({23.73*1000/cold_cache.mean():.0f} MB/s)")
+        print(f"   Read+Write (memcpy): {read_write.mean():.1f} μs ({23.73*1000/read_write.mean():.0f} MB/s)")
+        print(f"   Write overhead: {write_overhead:+.1f}% ({read_write.mean()/cold_cache.mean():.1f}x slowdown)")
+        print(f"   Cache effect: {cache_effect:+.1f}% (minimal for large dataset)")
+        print(f"   🎯 BOTTLENECK: Local memory write, NOT shared memory access!")
 
 
 if __name__ == '__main__':

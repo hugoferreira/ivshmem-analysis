@@ -30,18 +30,54 @@ typedef enum {
     GUEST_STATE_ACKNOWLEDGED = 4
 } guest_state_t;
 
+// Hardware performance counter results for detailed analysis
+struct performance_metrics {
+    // Cache metrics
+    uint64_t l1_cache_misses;
+    uint64_t l1_cache_references;
+    uint64_t llc_misses;            // Last Level Cache (L3) misses
+    uint64_t llc_references;        // Last Level Cache references
+    
+    // Memory and TLB metrics
+    uint64_t memory_loads;
+    uint64_t memory_stores;
+    uint64_t tlb_misses;           // Translation Lookaside Buffer misses
+    
+    // CPU metrics
+    uint64_t cpu_cycles;
+    uint64_t instructions;
+    uint64_t context_switches;
+    
+    // Calculated metrics (rates stored as fixed-point * 10000 to avoid floating point in shared memory)
+    uint32_t l1_cache_miss_rate_x10000;      // L1 miss rate * 10000 (e.g., 1250 = 12.50%)
+    uint32_t llc_cache_miss_rate_x10000;     // LLC miss rate * 10000
+    uint32_t instructions_per_cycle_x10000;  // IPC * 10000
+    uint32_t cycles_per_byte_x10000;         // Cycles/byte * 10000
+    uint32_t tlb_miss_rate_x10000;          // TLB miss rate * 10000
+};
+
 // Timing measurements structure for detailed overhead analysis
 // IMPORTANT: Host and guest clocks are NOT synchronized!
 // Guest measures durations and reports them; host measures its own durations.
 // Never compare absolute timestamps across host/guest boundary.
 struct timing_data {
     // Guest-side DURATIONS (nanoseconds) - measured on guest clock
-    uint64_t guest_copy_duration;    // Time to memcpy from shared memory to local buffer
+    // Legacy field for backward compatibility
+    uint64_t guest_copy_duration;    // Time to memcpy from shared memory to local buffer (deprecated)
     uint64_t guest_verify_duration;  // Time to compute SHA256 verification (testing only)
     uint64_t guest_total_duration;   // Total processing time on guest
     
+    // NEW: Detailed cache behavior analysis
+    uint64_t guest_hot_cache_duration;   // Phase A: memcpy without cache flush (hot cache)
+    uint64_t guest_cold_cache_duration;  // Phase B: memcpy after cache flush (cold cache)
+    uint64_t guest_second_pass_duration; // Phase C: second memcpy after cold cache (warm cache)
+    uint64_t guest_cached_verify_duration; // Phase D: SHA256 with data already in cache
+    
+    // Hardware performance metrics from guest
+    struct performance_metrics guest_perf;
+    
     // Reserved for future use
-    uint64_t reserved[5];
+    uint64_t reserved[1];  // Reduced from 2 to 1 due to added fields
 };
 
 // Shared memory layout for cross-VM communication

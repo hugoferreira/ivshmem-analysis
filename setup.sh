@@ -7,6 +7,18 @@
 
 # Needs to work on both ARM64 and x86_64 architecture. Linux only, as ivshmem is not available on macOS.
 
+# CPU PINNING OPTIMIZATION:
+# This script supports CPU pinning to minimize VM exits and context switches by isolating
+# the VM and host processes to different CPU cores. Set these environment variables:
+#   VM_CPU_CORES="2-3"     - Pin VM to cores 2-3 (format: "0-3" or "0,2,4")
+#   HOST_CPU_CORES="0-1"   - Pin host processes to cores 0-1
+#   VM_VCPU_COUNT=2        - Number of virtual CPUs for the VM
+# 
+# Auto-configuration is enabled for systems with 4+ cores:
+#   4-5 cores: VM=2-3, Host=0-1
+#   6-7 cores: VM=2-4, Host=0-1,5
+#   8+ cores:  VM=2-5, Host=0-1,6-7
+
 # Variables
 IVSHMEM_SIZE=64
 VM_NAME="ivshmem-vm"
@@ -17,8 +29,57 @@ CERTIFICATE_FILE="temp_id_rsa"
 SHMEM_FILE="./ivshmem-shmem"
 QEMU_PATH="/usr/bin/qemu-system-x86_64"
 
+# CPU Pinning Configuration
+# Set VM_CPU_CORES to specify which cores to pin the VM to (e.g., "2-3" or "2,3")
+# Set HOST_CPU_CORES to specify which cores to pin host processes to (e.g., "0-1" or "0,1")
+# Leave empty to disable CPU pinning
+VM_CPU_CORES="${VM_CPU_CORES:-}"
+HOST_CPU_CORES="${HOST_CPU_CORES:-}"
+VM_VCPU_COUNT="${VM_VCPU_COUNT:-2}"  # Number of virtual CPUs for the VM
+
 # Detect OS
 OS=$(uname -s)
+
+# CPU topology detection and auto-configuration
+detect_cpu_topology() {
+  TOTAL_CORES=$(nproc)
+  echo "Detected $TOTAL_CORES CPU cores"
+  
+  # Auto-configure CPU pinning if not manually set
+  if [ -z "$VM_CPU_CORES" ] && [ -z "$HOST_CPU_CORES" ] && [ "$TOTAL_CORES" -ge 4 ]; then
+    # For systems with 4+ cores, automatically separate VM and host
+    if [ "$TOTAL_CORES" -ge 8 ]; then
+      # 8+ cores: VM gets cores 2-5, host gets cores 0-1,6-7
+      VM_CPU_CORES="2-5"
+      HOST_CPU_CORES="0-1,6-7"
+      VM_VCPU_COUNT=4
+    elif [ "$TOTAL_CORES" -ge 6 ]; then
+      # 6+ cores: VM gets cores 2-4, host gets cores 0-1,5
+      VM_CPU_CORES="2-4"
+      HOST_CPU_CORES="0-1,5"
+      VM_VCPU_COUNT=3
+    else
+      # 4-5 cores: VM gets cores 2-3, host gets cores 0-1
+      VM_CPU_CORES="2-3"
+      HOST_CPU_CORES="0-1"
+      VM_VCPU_COUNT=2
+    fi
+    
+    echo "Auto-configured CPU pinning:"
+    echo "  VM cores: $VM_CPU_CORES ($VM_VCPU_COUNT vCPUs)"
+    echo "  Host cores: $HOST_CPU_CORES"
+    echo "  (Set VM_CPU_CORES/HOST_CPU_CORES environment variables to override)"
+  elif [ -n "$VM_CPU_CORES" ] || [ -n "$HOST_CPU_CORES" ]; then
+    echo "Using manual CPU pinning configuration:"
+    [ -n "$VM_CPU_CORES" ] && echo "  VM cores: $VM_CPU_CORES"
+    [ -n "$HOST_CPU_CORES" ] && echo "  Host cores: $HOST_CPU_CORES"
+  else
+    echo "CPU pinning disabled (less than 4 cores or manually disabled)"
+  fi
+}
+
+# Detect CPU topology for auto-configuration
+detect_cpu_topology
 
 # Create shared memory file
 if [ "$OS" = "Darwin" ]; then
@@ -175,15 +236,26 @@ if pgrep -f "qemu-system-x86_64.*ivshmem" > /dev/null; then
   exit 0
 fi
 
+# Prepare CPU pinning arguments
+CPU_PINNING_FLAGS=""
+if [ -n "$VM_CPU_CORES" ]; then
+  # Create CPU pinning command prefix
+  CPU_PINNING_CMD="taskset -c $VM_CPU_CORES"
+  echo "VM will be pinned to CPU cores: $VM_CPU_CORES"
+else
+  CPU_PINNING_CMD=""
+fi
+
 # Launch QEMU VM with or without ivshmem Device
 if [ $HAS_IVSHMEM -eq 1 ]; then
   # With ivshmem support - shared memory will be created by run_test.sh
   echo "Starting VM with ivshmem support..."
-  $QEMU_PATH \
+  $CPU_PINNING_CMD $QEMU_PATH \
     -machine q35 \
     $CPU_FLAG \
     $ACCEL_FLAG \
     -m 2048 \
+    -smp cpus=$VM_VCPU_COUNT,maxcpus=$VM_VCPU_COUNT \
     -drive file=$VM_DISK,format=qcow2,if=virtio \
     -drive file=$CLOUD_INIT_ISO,format=raw,if=virtio \
     -device virtio-net-pci,netdev=net0 \
@@ -194,11 +266,12 @@ if [ $HAS_IVSHMEM -eq 1 ]; then
 else
   # Without ivshmem (fallback)
   echo "Starting VM without ivshmem (limited functionality)..."
-  $QEMU_PATH \
+  $CPU_PINNING_CMD $QEMU_PATH \
     -machine q35 \
     $CPU_FLAG \
     $ACCEL_FLAG \
     -m 2048 \
+    -smp cpus=$VM_VCPU_COUNT,maxcpus=$VM_VCPU_COUNT \
     -drive file=$VM_DISK,format=qcow2,if=virtio \
     -drive file=$CLOUD_INIT_ISO,format=raw,if=virtio \
     -device virtio-net-pci,netdev=net0 \
@@ -238,8 +311,17 @@ echo ""
 echo "=========================================="
 echo "VM is ready!"
 echo "=========================================="
+if [ -n "$VM_CPU_CORES" ] || [ -n "$HOST_CPU_CORES" ]; then
+  echo "CPU Pinning Configuration:"
+  [ -n "$VM_CPU_CORES" ] && echo "  VM pinned to cores: $VM_CPU_CORES ($VM_VCPU_COUNT vCPUs)"
+  [ -n "$HOST_CPU_CORES" ] && echo "  Host processes will use cores: $HOST_CPU_CORES"
+  echo ""
+fi
 echo "To run performance tests:"
 echo "  ./run_test.sh"
+echo ""
+echo "To run with custom CPU pinning:"
+echo "  VM_CPU_CORES=2-3 HOST_CPU_CORES=0-1 ./run_test.sh"
 echo ""
 echo "To connect to the VM manually:"
 echo "  ssh -i $CERTIFICATE_FILE -p 2222 debian@localhost"
