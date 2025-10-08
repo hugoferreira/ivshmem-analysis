@@ -1,7 +1,7 @@
-.PHONY: all clean host guest deploy test
+.PHONY: all clean host guest deploy test memory_baseline memory_baseline_no_simd baseline
 
 CC = gcc
-CFLAGS = -Wall -O2 -std=c11
+CFLAGS = -Wall -O2 -std=c11 -march=native -ftree-vectorize -ffast-math
 LDFLAGS = -lrt -lssl -lcrypto
 SSHFLAGS = -i temp_id_rsa -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
 SCPFLAGS = -i temp_id_rsa -P 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
@@ -17,6 +17,21 @@ host: host_writer.c
 
 guest: guest_reader.c
 	$(CC) $(CFLAGS) -o guest_reader guest_reader.c $(LDFLAGS)
+
+# Memory baseline tests (SIMD-optimized by default due to CFLAGS)
+memory_baseline: memory_baseline.c
+	$(CC) $(CFLAGS) -o memory_baseline memory_baseline.c
+	@echo "SIMD-optimized memory_baseline built with vectorization flags"
+
+# Memory baseline without SIMD for comparison
+memory_baseline_no_simd: memory_baseline.c
+	$(CC) -Wall -O2 -std=c11 -o memory_baseline_no_simd memory_baseline.c
+	@echo "Standard (non-SIMD) memory_baseline built"
+
+# Quick baseline performance test
+baseline: memory_baseline
+	@echo "Running SIMD-optimized memory baseline (5MB, 3 iterations)..."
+	./memory_baseline 5 3
 
 # Deploy guest program to VM (compile source on VM)
 deploy: guest
@@ -66,8 +81,8 @@ debug-test: host deploy-binary
 	@echo "" | ./host_writer -l 1
 
 clean:
-	rm -f host_writer $(GUEST_PROGRAM)
-	@ssh $(SSHFLAGS) $(SSH_PORT_FLAGS) $(VM_NAME) 'rm -f $(TARGET_DIR)/$(GUEST_PROGRAM) $(TARGET_DIR)/$(GUEST_PROGRAM).c $(TARGET_DIR)/common.h $(TARGET_DIR)/performance_counters.h' 2>/dev/null || true
+	rm -f host_writer $(GUEST_PROGRAM) memory_baseline memory_baseline_no_simd
+	@ssh $(SSHFLAGS) $(SSH_PORT_FLAGS) $(VM_NAME) 'rm -f $(TARGET_DIR)/$(GUEST_PROGRAM) $(TARGET_DIR)/$(GUEST_PROGRAM).c $(TARGET_DIR)/common.h $(TARGET_DIR)/performance_counters.h $(TARGET_DIR)/memory_baseline*' 2>/dev/null || true
 
 clean_guest:
 	@ssh $(SSHFLAGS) $(SSH_PORT_FLAGS) $(VM_NAME) 'rm -f $(TARGET_DIR)/$(GUEST_PROGRAM) $(TARGET_DIR)/$(GUEST_PROGRAM).c $(TARGET_DIR)/common.h $(TARGET_DIR)/performance_counters.h' 2>/dev/null || true

@@ -2,7 +2,17 @@
  * guest_reader.c - Guest program to read from ivshmem PCI device
  * 
  * This program reads data from the ivshmem PCI BAR2 and measures performance
- * with detailed timing breakdown of all overheads
+ * with detailed timing breakdown of all overheads.
+ * 
+ * SIMD OPTIMIZATION:
+ * The data read loops include compiler hints for SIMD vectorization:
+ * - #pragma GCC ivdep: Ignore vector dependencies 
+ * - #pragma clang loop vectorize(enable): Force Clang vectorization
+ * - #pragma GCC unroll 4: Unroll loops 4x for better instruction pipelining
+ * - __restrict__ pointers: Help compiler understand memory aliasing
+ * - __builtin_assume_aligned(): Alignment hints for vectorization
+ * 
+ * Compile with: gcc -O2 -march=native -ftree-vectorize
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -27,6 +37,7 @@
 #include "performance_counters.h"
 
 #define PCI_RESOURCE_PATH "/sys/bus/pci/devices/0000:00:03.0/resource2"
+#define PCI_RESOURCE_WC_PATH "/sys/bus/pci/devices/0000:00:03.0/resource2_wc"
 #define SHMEM_PATH "/dev/shm/ivshmem"
 
 static inline uint64_t get_time_ns(void)
@@ -104,14 +115,34 @@ static void flush_cache_range(void *addr, size_t len) {
     #endif
 }
 
-// Force read of buffer
+// Force read of buffer (prevents optimization while allowing realistic performance)
 static void force_buffer_read(const uint8_t *data, uint32_t size)
 {
-    volatile uint8_t dummy = 0;
-    for (size_t i = 0; i < size; i += 64) {
+    uint64_t dummy = 0;
+    uint64_t * __restrict__ data64 = (uint64_t * __restrict__)data;
+    size_t size64 = size / 8;
+    size_t remainder = size % 8;
+    
+    // Hint to compiler for alignment and vectorization
+    data64 = (uint64_t *)__builtin_assume_aligned(data64, 8);
+    
+    // SIMD optimization hints for vectorized buffer read
+    #pragma GCC ivdep
+    #pragma clang loop vectorize(enable)
+    #pragma GCC unroll 4
+    for (size_t i = 0; i < size64; i++) {
+        dummy ^= data64[i];
+    }
+    
+    // Handle remainder bytes (non-vectorized)
+    for (size_t i = size64 * 8; i < size64 * 8 + remainder; i++) {
         dummy ^= data[i];
     }
-    (void)dummy;
+    
+    // Use result to prevent optimization
+    if ((dummy & 0xFF) == 0xFF) {
+        printf("Unusual: checksum LSB was 0xFF\n");
+    }
 }
 
 // Print usage
@@ -122,11 +153,12 @@ static void print_usage(const char *program_name)
     printf("  -l, --latency [COUNT]     Expect latency test (default: 100 messages)\n");
     printf("  -b, --bandwidth [COUNT]   Expect bandwidth test (default: 10 iterations)\n");
     printf("  -c, --count COUNT         Number of messages/iterations to expect\n");
+    printf("  -w, --write-combining     Use resource2_wc (write-combining) instead of resource2\n");
     printf("  -h, --help               Show this help\n");
     printf("\n");
 }
 
-void monitor_latency(volatile struct shared_data *shm, bool expect_latency, bool expect_bandwidth, int expected_count)
+void monitor_latency(volatile struct shared_data *shm, bool expect_latency, bool expect_bandwidth, int expected_count, bool use_write_combining)
 {
     printf("Guest Reader - Monitoring for messages from host...\n");
     printf("Expected: %s%s%s (count: %d)\n", 
@@ -134,8 +166,11 @@ void monitor_latency(volatile struct shared_data *shm, bool expect_latency, bool
            (expect_latency && expect_bandwidth) ? "+ " : "",
            expect_bandwidth ? "bandwidth" : "",
            expected_count);
-    printf("Will measure: memcpy from shared memory to local buffer (actual transmission)\n");
-    printf("Plus SHA256 verification time (testing only, not real overhead)\n\n");
+    printf("Will measure: 64-bit read+XOR vs memcpy performance comparison (all data accessed)\n");
+    printf("Plus SHA256 verification time (testing only, not real overhead)\n");
+    printf("Memory access mode: %s\n", 
+           use_write_combining ? "Write-combining (may improve write performance)" : "Standard cached access");
+    printf("\n");
     fflush(stdout);
     
     int message_count = 0;
@@ -264,8 +299,25 @@ void monitor_latency(volatile struct shared_data *shm, bool expect_latency, bool
         
         // WARM-UP: Initial access to handle page faults and system overhead
         // This is not measured but prepares the system for accurate measurements
-        volatile uint64_t dummy_warmup = 0;
-        for (size_t i = 0; i < data_size; i += 64) {
+        // Use 64-bit reads with SIMD optimization hints for efficiency while accessing all data
+        uint64_t dummy_warmup = 0;
+        uint64_t * __restrict__ data_ptr64 = (uint64_t * __restrict__)data_ptr;
+        size_t size64 = data_size / 8;
+        size_t remainder = data_size % 8;
+        
+        // Hint to compiler that data_ptr64 is aligned for better vectorization
+        data_ptr64 = (uint64_t *)__builtin_assume_aligned(data_ptr64, 8);
+        
+        // SIMD optimization hints for vectorization
+        #pragma GCC ivdep
+        #pragma clang loop vectorize(enable)
+        #pragma GCC unroll 4
+        for (size_t i = 0; i < size64; i++) {
+            dummy_warmup ^= data_ptr64[i];
+        }
+        
+        // Handle remainder bytes (non-vectorized)
+        for (size_t i = size64 * 8; i < size64 * 8 + remainder; i++) {
             dummy_warmup ^= data_ptr[i];
         }
         __sync_synchronize();
@@ -274,8 +326,18 @@ void monitor_latency(volatile struct shared_data *shm, bool expect_latency, bool
         // After warm-up, data should be in CPU cache
         uint64_t hot_read_start = get_time_ns();
         
-        volatile uint64_t dummy_hot = 0;
-        for (size_t i = 0; i < data_size; i += 64) {
+        uint64_t dummy_hot = 0;
+        
+        // SIMD optimization hints for vectorized hot cache read
+        #pragma GCC ivdep
+        #pragma clang loop vectorize(enable)
+        #pragma GCC unroll 4
+        for (size_t i = 0; i < size64; i++) {
+            dummy_hot ^= data_ptr64[i];
+        }
+        
+        // Handle remainder bytes (non-vectorized)
+        for (size_t i = size64 * 8; i < size64 * 8 + remainder; i++) {
             dummy_hot ^= data_ptr[i];
         }
         __sync_synchronize(); // Ensure reads complete
@@ -289,8 +351,18 @@ void monitor_latency(volatile struct shared_data *shm, bool expect_latency, bool
         
         uint64_t cold_read_start = get_time_ns();
         
-        volatile uint64_t dummy_cold = 0;
-        for (size_t i = 0; i < data_size; i += 64) {
+        uint64_t dummy_cold = 0;
+        
+        // SIMD optimization hints for vectorized cold cache read  
+        #pragma GCC ivdep
+        #pragma clang loop vectorize(enable)
+        #pragma GCC unroll 4
+        for (size_t i = 0; i < size64; i++) {
+            dummy_cold ^= data_ptr64[i];
+        }
+        
+        // Handle remainder bytes (non-vectorized)
+        for (size_t i = size64 * 8; i < size64 * 8 + remainder; i++) {
             dummy_cold ^= data_ptr[i];
         }
         __sync_synchronize(); // Ensure reads complete
@@ -313,6 +385,12 @@ void monitor_latency(volatile struct shared_data *shm, bool expect_latency, bool
         // Stop performance counters after all memory operations
         if (perf_available) {
             perf_counters_stop(&perf_counters, &guest_perf_results, data_size * 4); // warmup + 2 reads + 1 memcpy
+        }
+        
+        // Prevent compiler optimization of read loops by using the computed values
+        // This ensures all reads actually happen without artificial constraints
+        if (dummy_warmup + dummy_hot + dummy_cold == 0) {
+            printf("Impossible: all data was zero (this prevents optimization)\n");
         }
         
         // Copy final data to local buffer for verification (using the memcpy result)
@@ -368,16 +446,18 @@ void monitor_latency(volatile struct shared_data *shm, bool expect_latency, bool
         __sync_synchronize();
         
         // Display results with performance metrics
-        printf("Guest Timing (measured on guest clock) - Isolated Read/Write Analysis:\n");
-        printf("  Phase A (Pure Read Hot):   %lu ns (%.2f µs) [%6.0f MB/s] - Read shared memory (hot cache)\n", 
+        printf("Guest Timing (measured on guest clock) - %s Analysis:\n", 
+               use_write_combining ? "Write-Combining" : "Standard");
+        printf("  Phase A (Pure Read Hot):   %lu ns (%.2f µs) [%6.0f MB/s] - 64-bit read+XOR (hot cache)\n", 
                hot_cache_duration, hot_cache_duration / 1000.0, 
                (data_size / (1024.0 * 1024.0)) / (hot_cache_duration / 1e9));
-        printf("  Phase B (Pure Read Cold):  %lu ns (%.2f µs) [%6.0f MB/s] - Read shared memory (cold cache)\n", 
+        printf("  Phase B (Pure Read Cold):  %lu ns (%.2f µs) [%6.0f MB/s] - 64-bit read+XOR (cold cache)\n", 
                cold_cache_duration, cold_cache_duration / 1000.0, 
                (data_size / (1024.0 * 1024.0)) / (cold_cache_duration / 1e9));
-        printf("  Phase C (Read+Write):      %lu ns (%.2f µs) [%6.0f MB/s] - memcpy (read+write)\n", 
+        printf("  Phase C (Read+Write):      %lu ns (%.2f µs) [%6.0f MB/s] - memcpy (%s)\n", 
                second_pass_duration, second_pass_duration / 1000.0, 
-               (data_size / (1024.0 * 1024.0)) / (second_pass_duration / 1e9));
+               (data_size / (1024.0 * 1024.0)) / (second_pass_duration / 1e9),
+               use_write_combining ? "write-combining" : "standard caching");
         printf("  Phase D (SHA256 Verify):   %lu ns (%.2f µs) [testing only] - Integrity check\n", 
                cached_verify_duration, cached_verify_duration / 1000.0);
         
@@ -465,6 +545,7 @@ int main(int argc, char *argv[])
     // Parse command line arguments
     bool expect_latency = false;
     bool expect_bandwidth = false;
+    bool use_write_combining = false;
     int latency_count = 1000;
     int bandwidth_count = 10;
     int custom_count = -1;
@@ -490,6 +571,8 @@ int main(int argc, char *argv[])
                 fprintf(stderr, "Error: -c requires a count argument\n");
                 return 1;
             }
+        } else if (strcmp(argv[i], "-w") == 0 || strcmp(argv[i], "--write-combining") == 0) {
+            use_write_combining = true;
         } else {
             fprintf(stderr, "Unknown argument: %s\n", argv[i]);
             print_usage(argv[0]);
@@ -516,17 +599,32 @@ int main(int argc, char *argv[])
     printf("Configuration:\n");
     printf("  Expect latency: %s (%d messages)\n", expect_latency ? "yes" : "no", latency_count);
     printf("  Expect bandwidth: %s (%d iterations)\n", expect_bandwidth ? "yes" : "no", bandwidth_count);
+    printf("  Write-combining: %s\n", use_write_combining ? "enabled (resource2_wc)" : "disabled (resource2)");
     printf("  Total expected messages: %d\n\n", expected_count);
     fflush(stdout);
     
     // Check device
     int fd;
     struct stat st;
-    const char *device_path = PCI_RESOURCE_PATH;
+    const char *device_path;
     
-    if (access(PCI_RESOURCE_PATH, F_OK) != 0) {
+    // Select device path based on write-combining preference
+    if (use_write_combining) {
+        device_path = PCI_RESOURCE_WC_PATH;
+        if (access(PCI_RESOURCE_WC_PATH, F_OK) != 0) {
+            printf("ERROR: Write-combining resource2_wc not available\n");
+            printf("Falling back to regular resource2...\n");
+            device_path = PCI_RESOURCE_PATH;
+            use_write_combining = false;
+        }
+    } else {
+        device_path = PCI_RESOURCE_PATH;
+    }
+    
+    if (access(device_path, F_OK) != 0) {
         printf("INFO: PCI device not found, trying shared memory for host testing...\n");
         device_path = SHMEM_PATH;
+        use_write_combining = false;  // Shared memory doesn't support write-combining
         
         if (access(SHMEM_PATH, F_OK) != 0) {
             printf("ERROR: Neither PCI device nor shared memory found\n");
@@ -551,7 +649,8 @@ int main(int argc, char *argv[])
         return 1;
     }
     
-    printf("Resource: %s\n", device_path);
+    printf("Resource: %s %s\n", device_path, 
+           use_write_combining ? "(write-combining enabled)" : "(standard caching)");
     printf("Resource size: %ld bytes (%ld MB)\n", 
            st.st_size, st.st_size / (1024 * 1024));
     fflush(stdout);
@@ -588,7 +687,7 @@ int main(int argc, char *argv[])
     fflush(stdout);
     
     // Start monitoring
-    monitor_latency(shm, expect_latency, expect_bandwidth, expected_count);
+    monitor_latency(shm, expect_latency, expect_bandwidth, expected_count, use_write_combining);
     
     // Cleanup
     munmap(ptr, st.st_size);

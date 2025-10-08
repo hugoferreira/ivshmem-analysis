@@ -4,8 +4,13 @@
  * Tests different memory access patterns to establish baseline performance
  * Run this on the HOST to compare against VM performance
  * 
- * Compile: gcc -O2 -o memory_baseline memory_baseline.c
- * Run: ./memory_baseline
+ * SIMD OPTIMIZATION:
+ * Includes both standard and SIMD-optimized versions of tests to compare
+ * compiler vectorization performance improvements.
+ * 
+ * Compile (Standard): gcc -O2 -o memory_baseline memory_baseline.c
+ * Compile (SIMD):     gcc -O2 -march=native -ftree-vectorize -ffast-math -o memory_baseline memory_baseline.c
+ * Run: ./memory_baseline [size_mb] [iterations]
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -154,6 +159,180 @@ double test_memcpy_local(uint8_t *src, uint8_t *dst, size_t size)
     return (end - start) / 1e9; // Return seconds
 }
 
+// ===== SIMD-OPTIMIZED TEST FUNCTIONS =====
+
+// Test 7: SIMD-optimized 64-bit XOR read (cold cache)
+double test_simd_64bit_xor_cold(uint8_t *data, size_t size)
+{
+    flush_cache_range(data, size);
+    
+    uint64_t start = get_time_ns();
+    
+    volatile uint64_t dummy = 0;
+    uint64_t * __restrict__ data64 = (uint64_t * __restrict__)data;
+    size_t size64 = size / 8;
+    size_t remainder = size % 8;
+    
+    // Hint to compiler for alignment and vectorization
+    data64 = (uint64_t *)__builtin_assume_aligned(data64, 8);
+    
+    // SIMD optimization hints for vectorized 64-bit XOR
+    #pragma GCC ivdep
+    #pragma clang loop vectorize(enable)
+    #pragma GCC unroll 4
+    for (size_t i = 0; i < size64; i++) {
+        dummy ^= data64[i];
+    }
+    
+    // Handle remainder bytes (non-vectorized)
+    for (size_t i = size64 * 8; i < size64 * 8 + remainder; i++) {
+        dummy ^= data[i];
+    }
+    
+    uint64_t end = get_time_ns();
+    
+    // Use result to prevent optimization (volatile ensures this isn't optimized away)
+    (void)dummy;
+    
+    return (end - start) / 1e9; // Return seconds
+}
+
+// Test 8: SIMD-optimized 64-bit XOR read (hot cache)
+double test_simd_64bit_xor_hot(uint8_t *data, size_t size)
+{
+    // Pre-load into cache
+    volatile uint64_t warmup = 0;
+    uint64_t *data64_warmup = (uint64_t *)data;
+    size_t size64_warmup = size / 8;
+    for (size_t i = 0; i < size64_warmup; i += 8) { // Every 8th 64-bit value
+        warmup += data64_warmup[i];
+    }
+    
+    uint64_t start = get_time_ns();
+    
+    volatile uint64_t dummy = 0;
+    uint64_t * __restrict__ data64 = (uint64_t * __restrict__)data;
+    size_t size64 = size / 8;
+    size_t remainder = size % 8;
+    
+    // Hint to compiler for alignment and vectorization
+    data64 = (uint64_t *)__builtin_assume_aligned(data64, 8);
+    
+    // SIMD optimization hints for vectorized 64-bit XOR (hot cache)
+    #pragma GCC ivdep
+    #pragma clang loop vectorize(enable)
+    #pragma GCC unroll 4
+    for (size_t i = 0; i < size64; i++) {
+        dummy ^= data64[i];
+    }
+    
+    // Handle remainder bytes (non-vectorized)
+    for (size_t i = size64 * 8; i < size64 * 8 + remainder; i++) {
+        dummy ^= data[i];
+    }
+    
+    uint64_t end = get_time_ns();
+    
+    // Use result to prevent optimization (volatile ensures this isn't optimized away)
+    (void)dummy;
+    (void)warmup;
+    
+    return (end - start) / 1e9; // Return seconds
+}
+
+// Test 9: SIMD-optimized byte-by-byte read (cold cache)
+double test_simd_byte_by_byte_cold(uint8_t *data, size_t size)
+{
+    flush_cache_range(data, size);
+    
+    uint64_t start = get_time_ns();
+    
+    volatile uint64_t sum = 0;
+    uint8_t * __restrict__ data_ptr = (uint8_t * __restrict__)data;
+    
+    // SIMD optimization hints for vectorized byte addition
+    #pragma GCC ivdep
+    #pragma clang loop vectorize(enable)
+    #pragma GCC unroll 8
+    for (size_t i = 0; i < size; i++) {
+        sum += data_ptr[i];
+    }
+    
+    uint64_t end = get_time_ns();
+    
+    // Use result to prevent optimization (volatile ensures this isn't optimized away)
+    (void)sum;
+    
+    return (end - start) / 1e9; // Return seconds
+}
+
+// Test 10: SIMD-optimized byte-by-byte read (hot cache)
+double test_simd_byte_by_byte_hot(uint8_t *data, size_t size)
+{
+    // Pre-load into cache
+    volatile uint64_t warmup = 0;
+    for (size_t i = 0; i < size; i += 64) {
+        warmup += data[i];
+    }
+    
+    uint64_t start = get_time_ns();
+    
+    volatile uint64_t sum = 0;
+    uint8_t * __restrict__ data_ptr = (uint8_t * __restrict__)data;
+    
+    // SIMD optimization hints for vectorized byte addition (hot cache)
+    #pragma GCC ivdep
+    #pragma clang loop vectorize(enable)
+    #pragma GCC unroll 8
+    for (size_t i = 0; i < size; i++) {
+        sum += data_ptr[i];
+    }
+    
+    uint64_t end = get_time_ns();
+    
+    // Use result to prevent optimization (volatile ensures this isn't optimized away)
+    (void)sum;
+    (void)warmup;
+    
+    return (end - start) / 1e9; // Return seconds
+}
+
+// Test 11: SIMD-optimized memory copy (64-bit read+write)
+double test_simd_memcpy_64bit(uint8_t *src, uint8_t *dst, size_t size)
+{
+    flush_cache_range(src, size);
+    
+    uint64_t start = get_time_ns();
+    
+    uint64_t * __restrict__ src64 = (uint64_t * __restrict__)src;
+    uint64_t * __restrict__ dst64 = (uint64_t * __restrict__)dst;
+    size_t size64 = size / 8;
+    size_t remainder = size % 8;
+    
+    // Hint to compiler for alignment and vectorization
+    src64 = (uint64_t *)__builtin_assume_aligned(src64, 8);
+    dst64 = (uint64_t *)__builtin_assume_aligned(dst64, 8);
+    
+    // SIMD optimization hints for vectorized 64-bit copy
+    #pragma GCC ivdep
+    #pragma clang loop vectorize(enable)
+    #pragma GCC unroll 4
+    for (size_t i = 0; i < size64; i++) {
+        dst64[i] = src64[i];
+    }
+    
+    // Handle remainder bytes (non-vectorized)
+    for (size_t i = size64 * 8; i < size64 * 8 + remainder; i++) {
+        dst[i] = src[i];
+    }
+    
+    __sync_synchronize();
+    
+    uint64_t end = get_time_ns();
+    
+    return (end - start) / 1e9; // Return seconds
+}
+
 void print_result(const char *test_name, double time_sec, size_t size_bytes, const char *notes)
 {
     double size_mb = size_bytes / (1024.0 * 1024.0);
@@ -270,6 +449,44 @@ int main(int argc, char *argv[])
     }
     print_result("memcpy local (hot)", total_time / iterations, test_size, "From cache");
     
+    // ===== SIMD-OPTIMIZED TESTS =====
+    printf("\n--- SIMD-OPTIMIZED HEAP MEMORY ---\n");
+    
+    // Test SIMD 64-bit XOR (cold cache) - similar to guest_reader.c optimized loops
+    total_time = 0;
+    for (int i = 0; i < iterations; i++) {
+        total_time += test_simd_64bit_xor_cold(heap_src, test_size);
+    }
+    print_result("SIMD 64bit XOR (cold)", total_time / iterations, test_size, "Vectorized");
+    
+    // Test SIMD 64-bit XOR (hot cache)
+    total_time = 0;
+    for (int i = 0; i < iterations; i++) {
+        total_time += test_simd_64bit_xor_hot(heap_src, test_size);
+    }
+    print_result("SIMD 64bit XOR (hot)", total_time / iterations, test_size, "From cache");
+    
+    // Test SIMD byte-by-byte (cold cache)
+    total_time = 0;
+    for (int i = 0; i < iterations; i++) {
+        total_time += test_simd_byte_by_byte_cold(heap_src, test_size);
+    }
+    print_result("SIMD byte-by-byte (cold)", total_time / iterations, test_size, "Vectorized");
+    
+    // Test SIMD byte-by-byte (hot cache)
+    total_time = 0;
+    for (int i = 0; i < iterations; i++) {
+        total_time += test_simd_byte_by_byte_hot(heap_src, test_size);
+    }
+    print_result("SIMD byte-by-byte (hot)", total_time / iterations, test_size, "From cache");
+    
+    // Test SIMD memcpy (64-bit read+write)
+    total_time = 0;
+    for (int i = 0; i < iterations; i++) {
+        total_time += test_simd_memcpy_64bit(heap_src, heap_dst, test_size);
+    }
+    print_result("SIMD memcpy 64bit", total_time / iterations, test_size, "Vectorized");
+    
     // ===== SHARED MEMORY TESTS =====
     if (shm_ptr) {
         printf("\n--- SHARED MEMORY (/dev/shm) ---\n");
@@ -301,19 +518,58 @@ int main(int argc, char *argv[])
             total_time += test_memcpy_hot(shm_ptr, heap_dst, test_size);
         }
         print_result("memcpy shm→heap (hot)", total_time / iterations, test_size, "From cache");
+        
+        // ===== SIMD SHARED MEMORY TESTS =====
+        printf("\n--- SIMD-OPTIMIZED SHARED MEMORY ---\n");
+        
+        // Test SIMD 64-bit XOR from shm (cold)
+        total_time = 0;
+        for (int i = 0; i < iterations; i++) {
+            total_time += test_simd_64bit_xor_cold(shm_ptr, test_size);
+        }
+        print_result("SIMD 64bit XOR shm (cold)", total_time / iterations, test_size, "Vectorized");
+        
+        // Test SIMD 64-bit XOR from shm (hot)  
+        total_time = 0;
+        for (int i = 0; i < iterations; i++) {
+            total_time += test_simd_64bit_xor_hot(shm_ptr, test_size);
+        }
+        print_result("SIMD 64bit XOR shm (hot)", total_time / iterations, test_size, "From cache");
+        
+        // Test SIMD byte-by-byte from shm (cold)
+        total_time = 0;
+        for (int i = 0; i < iterations; i++) {
+            total_time += test_simd_byte_by_byte_cold(shm_ptr, test_size);
+        }
+        print_result("SIMD byte shm (cold)", total_time / iterations, test_size, "Vectorized");
+        
+        // Test SIMD memcpy shm→heap
+        total_time = 0;
+        for (int i = 0; i < iterations; i++) {
+            total_time += test_simd_memcpy_64bit(shm_ptr, heap_dst, test_size);
+        }
+        print_result("SIMD memcpy shm→heap", total_time / iterations, test_size, "Vectorized");
     }
     
     // Print summary
     printf("\n");
     printf("=== Expected Patterns ===\n");
-    printf("Hot cache (L1/L2):     50-100 GB/s\n");
-    printf("Cold cache (RAM):      5-20 GB/s\n");
-    printf("memcpy optimization:   10-25 GB/s\n");
-    printf("Byte-by-byte penalty:  3-5x slower than memcpy\n");
-    printf("Stride 64 vs full:     ~60x less data read\n");
+    printf("Hot cache (L1/L2):      50-100 GB/s\n");
+    printf("Cold cache (RAM):       5-20 GB/s\n");
+    printf("memcpy optimization:    10-25 GB/s\n");
+    printf("Byte-by-byte penalty:   3-5x slower than memcpy\n");
+    printf("Stride 64 vs full:      ~60x less data read\n");
+    printf("\n");
+    printf("=== SIMD Optimization Patterns ===\n");
+    printf("SIMD 64bit XOR:         1.5-2x faster than byte-by-byte\n");
+    printf("SIMD byte operations:   1.2-1.8x faster than standard\n");
+    printf("SIMD memcpy 64bit:      Similar to libc memcpy (already optimized)\n");
+    printf("Best SIMD gains:        Computational operations (XOR, ADD)\n");
+    printf("Limited SIMD gains:     Memory bandwidth-bound operations\n");
     printf("\n");
     printf("If all tests show similar performance (~GB/s range), memory is healthy.\n");
     printf("If shared memory is much slower (<0.5 GB/s), there's a mapping issue.\n");
+    printf("If SIMD shows no improvement, check compiler flags: -march=native -ftree-vectorize\n");
     
     // Cleanup
     free(heap_src);
