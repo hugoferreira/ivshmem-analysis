@@ -129,16 +129,6 @@ static void calculate_sha256(const uint8_t *data, size_t len, uint8_t *hash)
     SHA256_Final(hash, &ctx);
 }
 
-// Cache flush function to ensure data comes from memory, not cache
-static void flush_cache_range(void *addr, size_t len) {
-    // Force cache flush by reading every cache line with volatile access
-    volatile char *ptr = (volatile char *)addr;
-    for (size_t i = 0; i < len; i += 64) { // 64-byte cache lines
-        (void)ptr[i]; // Force read to flush cache
-    }
-    __sync_synchronize(); // Memory barrier
-}
-
 // Generate random frame buffer (width x height x 24bpp)
 static void generate_random_frame(uint8_t *buffer, int width, int height) {
     size_t frame_size = width * height * 3; // 24bpp = 3 bytes per pixel
@@ -219,9 +209,6 @@ void test_latency(volatile struct shared_data *shm, int iterations)
         // Calculate SHA256 of the data
         uint8_t expected_hash[32];
         calculate_sha256(data_ptr, frame_size, expected_hash);
-        
-        // Flush cache to ensure data comes from memory
-        flush_cache_range((void *)data_ptr, frame_size);
         
         // Reset error code
         shm->error_code = 0;
@@ -321,7 +308,8 @@ void test_latency(volatile struct shared_data *shm, int iterations)
 void test_bandwidth(volatile struct shared_data *shm, int iterations)
 {
     printf("\n=== Bandwidth Test ===\n");
-    printf("Testing with random frame data to avoid cache effects...\n");
+    printf("Testing transmission times with fresh random data per iteration...\n");
+    printf("Guest will handle cache flushing to ensure real memory reads.\n");
     
     // Calculate available buffer size
     size_t header_size = offsetof(struct shared_data, buffer);
@@ -366,7 +354,7 @@ void test_bandwidth(volatile struct shared_data *shm, int iterations)
                 usleep(10000); // 10ms delay
             }
             
-            // PREPARE ALL DATA FIRST - BEFORE changing state!
+            // PREPARE ALL DATA FIRST - BEFORE timing starts
             
             // Generate fresh random data for each iteration
             uint8_t *data_ptr = (uint8_t *)&shm->buffer[0];
@@ -375,9 +363,6 @@ void test_bandwidth(volatile struct shared_data *shm, int iterations)
             // Calculate SHA256 of the data
             uint8_t expected_hash[32];
             calculate_sha256(data_ptr, frame_size, expected_hash);
-            
-            // Flush cache to ensure data comes from memory
-            flush_cache_range((void *)data_ptr, frame_size);
             
             // Reset error code
             shm->error_code = 0;
@@ -389,15 +374,15 @@ void test_bandwidth(volatile struct shared_data *shm, int iterations)
             memcpy((void *)shm->data_sha256, expected_hash, 32);
             __sync_synchronize();
             
-            // NOW signal that data is ready - STATE CHANGE LAST!
+            // START TIMER - measuring transmission time only
+            uint64_t start_time = get_time_ns();
+            
+            // NOW signal that data is ready - STATE CHANGE starts transmission
             // STATE: HOST_STATE_READY -> HOST_STATE_SENDING
             set_host_state(shm, HOST_STATE_SENDING);
             
             printf("  [%d] Starting transfer...", iter + 1);
             fflush(stdout);
-            
-            // Start timer AFTER data generation and cache flush
-            uint64_t start_time = get_time_ns();
             
             // Wait for guest to start processing
             if (!wait_for_guest_state(shm, GUEST_STATE_PROCESSING, 2000000000ULL, "guest processing")) {

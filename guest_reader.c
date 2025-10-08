@@ -91,7 +91,22 @@ static void print_hash_comparison(const uint8_t *expected, const uint8_t *calcul
     printf("\n");
 }
 
-// Force read of buffer to ensure it's loaded from memory
+// Cache flush function to ensure we read from memory, not cache
+static void flush_cache_range(void *addr, size_t len) {
+    #if defined(__x86_64__) || defined(__i386__)
+    // Use clflush to flush specific cache lines
+    char *ptr = (char *)addr;
+    for (size_t i = 0; i < len; i += 64) { // 64-byte cache lines
+        __builtin_ia32_clflush(ptr + i);
+    }
+    __sync_synchronize(); // Memory barrier
+    #else
+    // Fallback: just use memory barrier
+    __sync_synchronize();
+    #endif
+}
+
+// Force read of buffer to ensure it's loaded from memory (after cache flush)
 static void force_buffer_read(const uint8_t *data, uint32_t size)
 {
     volatile uint8_t dummy = 0;
@@ -229,8 +244,13 @@ void monitor_latency(volatile struct shared_data *shm, bool expect_latency, bool
         
         debug_log("Starting buffer read and verification...");
         
-        // Force read of entire buffer to ensure it's loaded from memory
+        // Get data pointer
         uint8_t *data_ptr = (uint8_t *)&shm->buffer[0];
+        
+        // Flush cache to ensure we read from actual memory, not cache
+        flush_cache_range(data_ptr, data_size);
+        
+        // Force read of entire buffer to ensure it's loaded from memory
         force_buffer_read(data_ptr, data_size);
         
         debug_log("Buffer read completed, starting SHA256...");
