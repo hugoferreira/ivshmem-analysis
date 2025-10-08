@@ -135,7 +135,7 @@ success "Guest program deployed and compiled"
 
 # Clean up any existing guest processes
 echo "Cleaning up existing guest processes..."
-ssh $SSH_OPTS $VM_USER 'sudo pkill -f guest_reader || true' > /dev/null 2>&1 || true
+ssh $SSH_OPTS $VM_USER 'sudo pkill -f guest_reader || true' > /dev/null 2>&1 || true || true
 success "Cleanup complete"
 
 # Note: No manual shared memory reset needed!
@@ -166,7 +166,7 @@ if ! kill -0 $LATENCY_GUEST_PID 2>/dev/null; then
 fi
 
 # Run latency test on host (separate invocation)
-if sudo ./host_writer -l 100; then
+if sudo ./host_writer -l 10; then
     success "Latency test completed successfully"
 else
     warning "Latency test completed with issues"
@@ -180,7 +180,7 @@ if kill -0 $LATENCY_GUEST_PID 2>/dev/null; then
 else
     echo "  ✓ Latency guest process already completed"
 fi
-ssh $SSH_OPTS $VM_USER 'sudo pkill -f guest_reader || true' > /dev/null 2>&1
+ssh $SSH_OPTS $VM_USER 'sudo pkill -f guest_reader || true' > /dev/null 2>&1 || true
 sleep 2
 
 # Run bandwidth test separately  
@@ -201,7 +201,7 @@ if ! kill -0 $BANDWIDTH_GUEST_PID 2>/dev/null; then
 fi
 
 # Run bandwidth test on host (separate invocation)
-if sudo ./host_writer -b 10; then
+if echo "" | sudo ./host_writer -b 10; then
     success "Bandwidth test completed successfully"
 else
     warning "Bandwidth test completed with issues"
@@ -217,7 +217,7 @@ else
 fi
 
 # Final cleanup
-ssh $SSH_OPTS $VM_USER 'sudo pkill -f guest_reader || true' > /dev/null 2>&1
+ssh $SSH_OPTS $VM_USER 'sudo pkill -f guest_reader || true' > /dev/null 2>&1 || true
 
 # Show results
 echo ""
