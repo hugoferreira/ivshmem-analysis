@@ -251,8 +251,10 @@ wget https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd
 ### Generated Files
 
 After running tests:
-- `latency_results.csv` - Bilateral timing measurements (host_memcpy_ns, roundtrip_ns, guest_memcpy_ns, guest_verify_ns, notification_est_ns)
-- `bandwidth_results.csv` - Multi-resolution bandwidth results with detailed timing breakdown
+- `latency_results.csv` - Clean timing measurements (host_memcpy_ns, roundtrip_ns, guest_memcpy_ns, guest_verify_ns, notification_est_ns)
+- `latency_performance.csv` - Hardware performance metrics (cache hits/misses, TLB misses, CPU cycles, IPC, etc.)
+- `bandwidth_results.csv` - Multi-resolution bandwidth results with timing breakdown
+- `bandwidth_performance.csv` - Hardware performance metrics for bandwidth tests per frame type
 - `latency_histogram.png` - Latency distribution plots  
 - `latency_over_time.png` - Time series plot
 - `latency_percentiles.png` - Percentile chart
@@ -472,18 +474,38 @@ The performance test automatically exports results to CSV files for detailed ana
 
 ### CSV Output Files
 
-After running the test, you'll find enhanced CSV files with bilateral timing measurements:
+After running the test, you'll find **separate CSV files** for timing and performance metrics:
 
-**`latency_results.csv`** - Detailed latency breakdown:
-- `iteration, host_memcpy_ns, host_memcpy_us, roundtrip_ns, roundtrip_us`
-- `guest_memcpy_ns, guest_memcpy_us, guest_verify_ns, guest_verify_us`  
-- `notification_est_ns, notification_est_us, total_ns, total_us, success`
+#### **Timing Data (Clean & Readable)**
 
-**`bandwidth_results.csv`** - Multi-resolution bandwidth analysis:
-- `iteration, frame_type, width, height, bpp, size_bytes, size_mb`
-- `host_memcpy_ns, host_memcpy_ms, host_memcpy_mbps`
-- `roundtrip_ns, roundtrip_ms, guest_memcpy_ns, guest_memcpy_ms, guest_memcpy_mbps`
-- `guest_verify_ns, guest_verify_ms, total_ns, total_ms, total_mbps, success`
+**`latency_results.csv`** - Core latency measurements:
+```
+iteration,host_memcpy_ns,host_memcpy_us,roundtrip_ns,roundtrip_us,guest_memcpy_ns,guest_memcpy_us,guest_verify_ns,guest_verify_us,notification_est_ns,notification_est_us,total_ns,total_us,success
+```
+
+**`bandwidth_results.csv`** - Multi-resolution bandwidth results:
+```
+iteration,frame_type,width,height,bpp,size_bytes,size_mb,host_memcpy_ns,host_memcpy_ms,host_memcpy_mbps,roundtrip_ns,roundtrip_ms,guest_memcpy_ns,guest_memcpy_ms,guest_memcpy_mbps,guest_verify_ns,guest_verify_ms,total_ns,total_ms,total_mbps,success
+```
+
+#### **Performance Metrics (Hardware Counters)**
+
+**`latency_performance.csv`** - Hardware performance analysis per message:
+```
+iteration,host_l1_cache_misses,host_l1_cache_references,host_l1_miss_rate,host_llc_misses,host_llc_references,host_llc_miss_rate,host_tlb_misses,host_cpu_cycles,host_instructions,host_ipc,host_cycles_per_byte,host_context_switches,guest_l1_cache_misses,guest_l1_cache_references,guest_l1_miss_rate,guest_llc_misses,guest_llc_references,guest_llc_miss_rate,guest_tlb_misses,guest_cpu_cycles,guest_instructions,guest_ipc,guest_cycles_per_byte,guest_context_switches
+```
+
+**`bandwidth_performance.csv`** - Hardware performance per frame type:
+```
+iteration,frame_type,host_l1_cache_misses,host_l1_cache_references,host_l1_miss_rate,host_llc_misses,host_llc_references,host_llc_miss_rate,host_tlb_misses,host_cpu_cycles,host_instructions,host_ipc,host_cycles_per_byte,host_context_switches,guest_l1_cache_misses,guest_l1_cache_references,guest_l1_miss_rate,guest_llc_misses,guest_llc_references,guest_llc_miss_rate,guest_tlb_misses,guest_cpu_cycles,guest_instructions,guest_ipc,guest_cycles_per_byte,guest_context_switches
+```
+
+#### **CSV File Relationships**
+
+All CSV files can be **joined by iteration number** for analysis:
+- **Timing files**: Focus on duration and bandwidth measurements  
+- **Performance files**: Focus on hardware efficiency and cache behavior
+- **Analysis**: Correlate slow operations with high cache miss rates, TLB misses, etc.
 
 ### Statistical Analysis
 

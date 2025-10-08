@@ -24,6 +24,7 @@
 #include <ctype.h>
 
 #include "common.h"
+#include "performance_counters.h"
 
 #define PCI_RESOURCE_PATH "/sys/bus/pci/devices/0000:00:03.0/resource2"
 #define SHMEM_PATH "/dev/shm/ivshmem"
@@ -189,6 +190,16 @@ void monitor_latency(volatile struct shared_data *shm, bool expect_latency, bool
         exit(1);
     }
     
+    // Initialize performance counters
+    struct perf_counters perf_counters;
+    bool perf_available = perf_counters_init(&perf_counters);
+    if (perf_available) {
+        printf("GUEST: ✓ Hardware performance counters initialized\n\n");
+    } else {
+        printf("GUEST: ⚠ Hardware performance counters not available\n");
+        printf("  Cache miss analysis will be limited\n\n");
+    }
+    
     while (message_count < expected_count) {
         if (shm->test_complete == 1) {
             printf("Test completion signal received. Exiting...\n");
@@ -227,48 +238,153 @@ void monitor_latency(volatile struct shared_data *shm, bool expect_latency, bool
         
         bool success = true;
         uint32_t error_code = 0;
+        uint8_t *measurement_buffer = NULL;
         
         // Get data pointer from shared memory
         uint8_t *data_ptr = (uint8_t *)&shm->buffer[0];
         
-        // MEASUREMENT 1: memcpy time - THIS IS THE ACTUAL READ OVERHEAD
-        // Flush cache first to ensure we read from actual shared memory
-        flush_cache_range(data_ptr, data_size);
+        // Pre-allocate measurement buffer (reuse for consistent measurements)
+        measurement_buffer = malloc(data_size);
+        if (!measurement_buffer) {
+            printf("Error: Failed to allocate measurement buffer\n");
+            success = false;
+            error_code = 2;
+            goto cleanup_and_continue;
+        }
         
-        uint64_t memcpy_start = get_time_ns();
+        // Warm up the measurement buffer to avoid allocation overhead in measurements
+        memset(measurement_buffer, 0, data_size);
         
-        memcpy(local_buffer, data_ptr, data_size);
+        struct perf_results guest_perf_results = {0};
+        
+        // Start performance counters for all measurements
+        if (perf_available) {
+            perf_counters_start(&perf_counters);
+        }
+        
+        // WARM-UP: Initial read to handle page faults and system overhead
+        // This is not measured but prepares the system for accurate measurements
+        memcpy(measurement_buffer, data_ptr, data_size);
+        __sync_synchronize();
+        
+        // PHASE A: HOT CACHE READ - memcpy with data potentially in cache
+        // After warm-up, data should be in CPU cache
+        uint64_t hot_cache_start = get_time_ns();
+        
+        memcpy(measurement_buffer, data_ptr, data_size);
         __sync_synchronize(); // Ensure memcpy completes
         
-        uint64_t memcpy_end = get_time_ns();
-        uint64_t memcpy_duration = memcpy_end - memcpy_start;
+        uint64_t hot_cache_end = get_time_ns();
+        uint64_t hot_cache_duration = hot_cache_end - hot_cache_start;
         
-        // MEASUREMENT 2: Verification time (SHA256) - TESTING ONLY
-        uint64_t verify_start = get_time_ns();
+        // PHASE B: COLD CACHE READ - memcpy after cache flush
+        // Flush cache lines for the shared memory to force memory access
+        flush_cache_range(data_ptr, data_size);
+        
+        uint64_t cold_cache_start = get_time_ns();
+        
+        memcpy(measurement_buffer, data_ptr, data_size);
+        __sync_synchronize(); // Ensure memcpy completes
+        
+        uint64_t cold_cache_end = get_time_ns();
+        uint64_t cold_cache_duration = cold_cache_end - cold_cache_start;
+        
+        // PHASE C: SECOND PASS READ - memcpy immediately after cold cache read
+        // This should be faster as data is now in cache from Phase B
+        uint64_t second_pass_start = get_time_ns();
+        
+        memcpy(measurement_buffer, data_ptr, data_size);
+        __sync_synchronize(); // Ensure memcpy completes
+        
+        uint64_t second_pass_end = get_time_ns();
+        uint64_t second_pass_duration = second_pass_end - second_pass_start;
+        
+        // Stop performance counters after all memcpy operations
+        if (perf_available) {
+            perf_counters_stop(&perf_counters, &guest_perf_results, data_size * 4); // warmup + 3 measured operations
+        }
+        
+        // Copy final data to local buffer for verification
+        memcpy(local_buffer, measurement_buffer, data_size);
+        
+        // PHASE D: CACHED VERIFY - SHA256 with data already in local cache
+        uint64_t cached_verify_start = get_time_ns();
         
         bool hash_match = verify_data_integrity(local_buffer, data_size, expected_hash);
         
-        uint64_t verify_end = get_time_ns();
-        uint64_t verify_duration = verify_end - verify_start;
+        uint64_t cached_verify_end = get_time_ns();
+        uint64_t cached_verify_duration = cached_verify_end - cached_verify_start;
+        
+        // Calculate legacy timing for backward compatibility
+        uint64_t memcpy_duration = cold_cache_duration; // Use cold cache as primary measurement
+        uint64_t verify_duration = cached_verify_duration;
         
         // Calculate total processing duration
         uint64_t processing_end = get_time_ns();
         uint64_t total_duration = processing_end - processing_start;
         
-        // WRITE DURATIONS to shared memory for host to read
+        // WRITE DURATIONS and PERFORMANCE METRICS to shared memory for host to read
+        // Legacy fields for backward compatibility
         shm->timing.guest_copy_duration = memcpy_duration;
         shm->timing.guest_verify_duration = verify_duration;
         shm->timing.guest_total_duration = total_duration;
+        
+        // NEW: Detailed cache behavior measurements
+        shm->timing.guest_hot_cache_duration = hot_cache_duration;
+        shm->timing.guest_cold_cache_duration = cold_cache_duration;
+        shm->timing.guest_second_pass_duration = second_pass_duration;
+        shm->timing.guest_cached_verify_duration = cached_verify_duration;
+        
+        // Write performance metrics (convert floating point to fixed-point for shared memory)
+        shm->timing.guest_perf.l1_cache_misses = guest_perf_results.l1_cache_misses;
+        shm->timing.guest_perf.l1_cache_references = guest_perf_results.l1_cache_references;
+        shm->timing.guest_perf.llc_misses = guest_perf_results.llc_misses;
+        shm->timing.guest_perf.llc_references = guest_perf_results.llc_references;
+        shm->timing.guest_perf.memory_loads = guest_perf_results.memory_loads;
+        shm->timing.guest_perf.memory_stores = guest_perf_results.memory_stores;
+        shm->timing.guest_perf.tlb_misses = guest_perf_results.tlb_misses;
+        shm->timing.guest_perf.cpu_cycles = guest_perf_results.cpu_cycles;
+        shm->timing.guest_perf.instructions = guest_perf_results.instructions;
+        shm->timing.guest_perf.context_switches = guest_perf_results.context_switches;
+        
+        // Convert rates to fixed-point integers (multiply by 10000)
+        shm->timing.guest_perf.l1_cache_miss_rate_x10000 = (uint32_t)(guest_perf_results.l1_cache_miss_rate * 10000.0);
+        shm->timing.guest_perf.llc_cache_miss_rate_x10000 = (uint32_t)(guest_perf_results.llc_cache_miss_rate * 10000.0);
+        shm->timing.guest_perf.instructions_per_cycle_x10000 = (uint32_t)(guest_perf_results.instructions_per_cycle * 10000.0);
+        shm->timing.guest_perf.cycles_per_byte_x10000 = (uint32_t)(guest_perf_results.cycles_per_byte * 10000.0);
+        shm->timing.guest_perf.tlb_miss_rate_x10000 = (uint32_t)(guest_perf_results.tlb_miss_rate * 10000.0);
+        
         __sync_synchronize();
         
-        // Display results
-        printf("Guest Timing (measured on guest clock):\n");
-        printf("  memcpy:       %lu ns (%.2f µs) [%.0f MB/s]\n", 
+        // Display results with performance metrics
+        printf("Guest Timing (measured on guest clock) - Cache Behavior Analysis:\n");
+        printf("  Phase A (Hot Cache):   %lu ns (%.2f µs) [%6.0f MB/s]\n", 
+               hot_cache_duration, hot_cache_duration / 1000.0, 
+               (data_size / (1024.0 * 1024.0)) / (hot_cache_duration / 1e9));
+        printf("  Phase B (Cold Cache):  %lu ns (%.2f µs) [%6.0f MB/s]\n", 
+               cold_cache_duration, cold_cache_duration / 1000.0, 
+               (data_size / (1024.0 * 1024.0)) / (cold_cache_duration / 1e9));
+        printf("  Phase C (Second Pass): %lu ns (%.2f µs) [%6.0f MB/s]\n", 
+               second_pass_duration, second_pass_duration / 1000.0, 
+               (data_size / (1024.0 * 1024.0)) / (second_pass_duration / 1e9));
+        printf("  Phase D (Cached Verify): %lu ns (%.2f µs) [testing only]\n", 
+               cached_verify_duration, cached_verify_duration / 1000.0);
+        
+        if (perf_available) {
+            printf("    Performance (combined 3 memcpys):  L1 cache %.1f%% miss, LLC cache %.1f%% miss, TLB %.3f%% miss\n",
+                   guest_perf_results.l1_cache_miss_rate * 100.0,
+                   guest_perf_results.llc_cache_miss_rate * 100.0,
+                   guest_perf_results.tlb_miss_rate * 100.0);
+            printf("    CPU:          %.2f IPC, %.1f cycles/byte, %lu context switches\n",
+                   guest_perf_results.instructions_per_cycle,
+                   guest_perf_results.cycles_per_byte,
+                   guest_perf_results.context_switches);
+        }
+        
+        printf("  Legacy memcpy:         %lu ns (%.2f µs) [%6.0f MB/s] (using cold cache)\n", 
                memcpy_duration, memcpy_duration / 1000.0, 
                (data_size / (1024.0 * 1024.0)) / (memcpy_duration / 1e9));
-        printf("  Verify:       %lu ns (%.2f µs) [testing only]\n", 
-               verify_duration, verify_duration / 1000.0);
-        printf("  Total:        %lu ns (%.2f µs)\n", 
+        printf("  Total:                 %lu ns (%.2f µs)\n", 
                total_duration, total_duration / 1000.0);
         
         if (hash_match) {
@@ -286,6 +402,13 @@ void monitor_latency(volatile struct shared_data *shm, bool expect_latency, bool
         }
         
         printf("  Processing complete\n\n");
+        
+cleanup_and_continue:
+        // Cleanup measurement buffer
+        if (measurement_buffer) {
+            free(measurement_buffer);
+            measurement_buffer = NULL;
+        }
         
         if (!success) {
             shm->error_code = error_code;
@@ -306,7 +429,12 @@ void monitor_latency(volatile struct shared_data *shm, bool expect_latency, bool
     
     printf("Guest monitoring loop ended after %d messages\n", message_count);
     
+    // Cleanup
     free(local_buffer);
+    
+    if (perf_available) {
+        perf_counters_cleanup(&perf_counters);
+    }
 }
 
 int main(int argc, char *argv[])

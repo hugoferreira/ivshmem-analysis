@@ -20,8 +20,8 @@ guest: guest_reader.c
 
 # Deploy guest program to VM (compile source on VM)
 deploy: guest
-	@echo "Copying guest_reader and common.h to VM..."
-	scp $(SCPFLAGS) $(GUEST_PROGRAM).c common.h $(VM_NAME):$(TARGET_DIR)/
+	@echo "Copying guest_reader, common.h, and performance_counters.h to VM..."
+	scp $(SCPFLAGS) $(GUEST_PROGRAM).c common.h performance_counters.h $(VM_NAME):$(TARGET_DIR)/
 	@echo "Compiling on VM..."
 	ssh $(SSHFLAGS) $(SSH_PORT_FLAGS) $(VM_NAME) 'cd $(TARGET_DIR) && $(CC) $(CFLAGS) -o $(GUEST_PROGRAM) $(GUEST_PROGRAM).c $(LDFLAGS)'
 	@echo "Guest program ready at $(TARGET_DIR)/guest_reader on VM"
@@ -67,8 +67,8 @@ debug-test: host deploy-binary
 
 clean:
 	rm -f host_writer $(GUEST_PROGRAM)
-	@ssh $(SSHFLAGS) $(SSH_PORT_FLAGS) $(VM_NAME) 'rm -f $(TARGET_DIR)/$(GUEST_PROGRAM) $(TARGET_DIR)/$(GUEST_PROGRAM).c' 2>/dev/null || true
+	@ssh $(SSHFLAGS) $(SSH_PORT_FLAGS) $(VM_NAME) 'rm -f $(TARGET_DIR)/$(GUEST_PROGRAM) $(TARGET_DIR)/$(GUEST_PROGRAM).c $(TARGET_DIR)/common.h $(TARGET_DIR)/performance_counters.h' 2>/dev/null || true
 
 clean_guest:
-	@ssh $(SSHFLAGS) $(SSH_PORT_FLAGS) $(VM_NAME) 'rm -f $(TARGET_DIR)/$(GUEST_PROGRAM) $(TARGET_DIR)/$(GUEST_PROGRAM).c' 2>/dev/null || true
+	@ssh $(SSHFLAGS) $(SSH_PORT_FLAGS) $(VM_NAME) 'rm -f $(TARGET_DIR)/$(GUEST_PROGRAM) $(TARGET_DIR)/$(GUEST_PROGRAM).c $(TARGET_DIR)/common.h $(TARGET_DIR)/performance_counters.h' 2>/dev/null || true
 

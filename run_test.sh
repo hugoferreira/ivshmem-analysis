@@ -1,19 +1,22 @@
 #!/bin/bash
 
 # Script to run the ivshmem performance test with comprehensive sanity checks
+#
+# CPU PINNING OPTIMIZATION:
+# This script supports CPU pinning to minimize context switches and improve performance.
+# The host_writer process will be pinned to specific CPU cores using taskset.
+# Environment variables (inherited from setup.sh or set manually):
+#   HOST_CPU_CORES="0-1"   - Pin host processes to cores 0-1 (format: "0-3" or "0,2,4")
+#   VM_CPU_CORES="2-3"     - Information about VM pinning (for display only)
+#
+# Example usage:
+#   HOST_CPU_CORES="0-1" VM_CPU_CORES="2-3" ./run_test.sh
 
 set -e  # Exit on any error
 
-echo "=== IVSHMEM Performance Test ==="
-echo ""
-
-# Configuration
-IVSHMEM_SIZE=64
-SHMEM_PATH="/dev/shm/ivshmem"
-SHMEM_FALLBACK="./ivshmem-shmem"
-SSH_KEY="temp_id_rsa"
-SSH_OPTS="-i $SSH_KEY -p 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
-VM_USER="debian@localhost"
+newline() {
+    echo ""
+}
 
 # Colors for output
 RED='\033[0;31m'
@@ -22,21 +25,68 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 error() {
-    echo -e "${RED}ERROR: $1${NC}" >&2
+    echo -e "${RED}[X] $1${NC}" >&2
     exit 1
 }
 
 warning() {
-    echo -e "${YELLOW}WARNING: $1${NC}" >&2
+    echo -e "${YELLOW}[!] $1${NC}" >&2
 }
 
 success() {
-    echo -e "${GREEN}✓ $1${NC}"
+    echo -e "${GREEN}[✓] $1${NC}"
 }
 
 info() {
-    echo "ℹ  $1"
+    echo "[i] $1"
 }
+
+# Configuration
+IVSHMEM_SIZE=64
+SHMEM_PATH="/dev/shm/ivshmem"
+SHMEM_FALLBACK="./ivshmem-shmem"
+SSH_KEY="temp_id_rsa"
+SSH_OPTS="-i $SSH_KEY -p 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+VM_USER="debian@localhost"
+LAT_COUNT=100
+BAND_COUNT=10
+
+# CPU Pinning Configuration (inherited from setup.sh or set manually)
+# These can be overridden by environment variables
+VM_CPU_CORES="${VM_CPU_CORES:-}"
+HOST_CPU_CORES="${HOST_CPU_CORES:-}"
+
+# Auto-detect CPU configuration if not set
+detect_host_cpu_config() {
+  if [ -z "$HOST_CPU_CORES" ] && [ -z "$VM_CPU_CORES" ]; then
+    TOTAL_CORES=$(nproc)
+    if [ "$TOTAL_CORES" -ge 4 ]; then
+      # Use same auto-configuration as setup.sh
+      if [ "$TOTAL_CORES" -ge 8 ]; then
+        HOST_CPU_CORES="0-1,6-7"
+      elif [ "$TOTAL_CORES" -ge 6 ]; then
+        HOST_CPU_CORES="0-1,5"
+      else
+        HOST_CPU_CORES="0-1"
+      fi
+      info "Auto-configured host CPU cores: $HOST_CPU_CORES"
+    fi
+  fi
+}
+
+echo "=== IVSHMEM Performance Test ==="
+newline
+
+# Configure CPU pinning
+detect_host_cpu_config
+
+# Display CPU pinning configuration
+if [ -n "$HOST_CPU_CORES" ] || [ -n "$VM_CPU_CORES" ]; then
+  info "CPU Pinning Configuration:"
+  [ -n "$HOST_CPU_CORES" ] && info "  Host processes pinned to cores: $HOST_CPU_CORES"
+  [ -n "$VM_CPU_CORES" ] && info "  VM should be pinned to cores: $VM_CPU_CORES"
+  newline
+fi
 
 # Sanity Check 1: VM is running
 echo "Checking VM status..."
@@ -95,6 +145,23 @@ if ! pkg-config --exists openssl 2>/dev/null && ! test -f /usr/include/openssl/s
 fi
 success "OpenSSL libraries OK"
 
+# Sanity Check 8: CPU pinning support
+echo "Checking CPU pinning support..."
+if [ -n "$HOST_CPU_CORES" ] && ! command -v taskset > /dev/null; then
+    error "taskset not found but CPU pinning is requested. Install with: apt-get install util-linux"
+fi
+if [ -n "$HOST_CPU_CORES" ]; then
+    # Test that the specified cores are valid
+    if ! taskset -c "$HOST_CPU_CORES" true 2>/dev/null; then
+        error "Invalid host CPU cores specified: $HOST_CPU_CORES. Use format like '0-1' or '0,2,4'"
+    fi
+    success "CPU pinning configuration valid"
+elif [ -n "$VM_CPU_CORES" ]; then
+    info "VM CPU pinning configured (taskset not needed for host)"
+else
+    info "CPU pinning disabled"
+fi
+
 # Verify shared memory setup
 echo "Verifying shared memory setup..."
 EXPECTED_SIZE=$((IVSHMEM_SIZE * 1024 * 1024))
@@ -144,18 +211,18 @@ success "Cleanup complete"
 info "Shared memory initialization will be handled by host_writer.c"
 
 # Run host writer
-echo ""
+newline
 info "Starting performance tests..."
-echo ""
+newline
 
 # Run latency test first
-echo ""
+newline
 info "=== RUNNING LATENCY TEST ==="
-echo ""
+newline
 
 # Start guest reader for latency test only
-echo "Starting guest reader for latency test (1000 iterations)..."
-ssh $SSH_OPTS $VM_USER 'sudo /tmp/guest_reader -l 1000' > /tmp/guest_latency.log 2>&1 &
+echo "Starting guest reader for latency test (${LAT_COUNT} iterations)..."
+ssh $SSH_OPTS $VM_USER 'sudo /tmp/guest_reader -l $(LAT_COUNT)' > /tmp/guest_latency.log 2>&1 &
 LATENCY_GUEST_PID=$!
 
 # Wait for guest to initialize
@@ -165,8 +232,16 @@ if ! kill -0 $LATENCY_GUEST_PID 2>/dev/null; then
     error "Latency guest failed to start. Check log: cat /tmp/guest_latency.log"
 fi
 
+# Prepare host CPU pinning command
+if [ -n "$HOST_CPU_CORES" ]; then
+  HOST_PINNING_CMD="taskset -c $HOST_CPU_CORES"
+  info "Host writer will be pinned to cores: $HOST_CPU_CORES"
+else
+  HOST_PINNING_CMD=""
+fi
+
 # Run latency test on host (separate invocation)
-if sudo ./host_writer -l 1000; then
+if sudo $HOST_PINNING_CMD ./host_writer -l $LAT_COUNT; then
     success "Latency test completed successfully"
 else
     warning "Latency test completed with issues"
@@ -184,13 +259,13 @@ ssh $SSH_OPTS $VM_USER 'sudo pkill -f guest_reader || true' > /dev/null 2>&1 || 
 sleep 2
 
 # Run bandwidth test separately  
-echo ""
+newline
 info "=== RUNNING BANDWIDTH TEST ==="
-echo ""
+newline
 
-# Start guest reader for bandwidth test only (30 total: 10 iterations × 3 frame types)
-echo "Starting guest reader for bandwidth test (30 messages: 10×3 frame types)..."
-ssh $SSH_OPTS $VM_USER 'sudo /tmp/guest_reader -c 30' > /tmp/guest_bandwidth.log 2>&1 &
+# Start guest reader for bandwidth test only
+echo "Starting guest reader for bandwidth test (${BAND_COUNT} iterations)..."
+ssh $SSH_OPTS $VM_USER 'sudo /tmp/guest_reader -c $((BAND_COUNT * 3))' > /tmp/guest_bandwidth.log 2>&1 &
 BANDWIDTH_GUEST_PID=$!
 
 # Wait for guest to initialize
@@ -201,7 +276,7 @@ if ! kill -0 $BANDWIDTH_GUEST_PID 2>/dev/null; then
 fi
 
 # Run bandwidth test on host (separate invocation)
-if echo "" | sudo ./host_writer -b 10; then
+if echo "" | sudo $HOST_PINNING_CMD ./host_writer -b ${BAND_COUNT}; then
     success "Bandwidth test completed successfully"
 else
     warning "Bandwidth test completed with issues"
@@ -220,7 +295,7 @@ fi
 ssh $SSH_OPTS $VM_USER 'sudo pkill -f guest_reader || true' > /dev/null 2>&1 || true
 
 # Show results
-echo ""
+newline
 echo "=========================================="
 echo "Test Results:"
 echo "=========================================="
@@ -238,13 +313,23 @@ else
     warning "No bandwidth results found"
 fi
 
-echo ""
+newline
 info "To analyze results, run: python3 analyze_results.py"
 info "Or with uv: uv run analyze_results.py"
+newline
+if [ -n "$HOST_CPU_CORES" ] || [ -n "$VM_CPU_CORES" ]; then
+    info "CPU Pinning was used for this test:"
+    [ -n "$HOST_CPU_CORES" ] && info "  Host processes pinned to: $HOST_CPU_CORES"
+    [ -n "$VM_CPU_CORES" ] && info "  VM should be pinned to: $VM_CPU_CORES"
+    info "This should minimize context switches and VM exits."
+else
+    info "To optimize performance with CPU pinning, set environment variables:"
+    info "  HOST_CPU_CORES=0-1 VM_CPU_CORES=2-3 ./run_test.sh"
+fi
 
 # Automatically run analysis if results exist
 if [ -f latency_results.csv ] || [ -f bandwidth_results.csv ]; then
-    echo ""
+    newline
     info "Running automatic analysis..."
     if command -v uv &> /dev/null; then
         if uv run analyze_results.py; then
@@ -257,6 +342,6 @@ if [ -f latency_results.csv ] || [ -f bandwidth_results.csv ]; then
         info "Then run: uv run analyze_results.py"
     fi
 fi
-echo ""
+newline
 
 success "Test completed!"

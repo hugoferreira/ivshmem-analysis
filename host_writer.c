@@ -25,6 +25,7 @@
 #include <errno.h>
 
 #include "common.h"
+#include "performance_counters.h"
 
 #define SHMEM_PATH "/dev/shm/ivshmem"
 #define SHMEM_SIZE (64 * 1024 * 1024)  // 64MB
@@ -180,9 +181,12 @@ void test_latency(volatile struct shared_data *shm, int iterations)
     printf("Host: memcpy to shared memory | Guest: memcpy from shared memory\n");
     printf("(Data generation and SHA256 done outside measurement)\n\n");
     
-    // Create CSV logger
+    // Create CSV loggers - separate files for timing and performance metrics
     csv_logger_t *csv = csv_create("latency_results.csv", 
-        "iteration,host_memcpy_ns,host_memcpy_us,roundtrip_ns,roundtrip_us,guest_memcpy_ns,guest_memcpy_us,guest_verify_ns,guest_verify_us,notification_est_ns,notification_est_us,total_ns,total_us,success");
+        "iteration,host_memcpy_ns,host_memcpy_us,roundtrip_ns,roundtrip_us,guest_memcpy_ns,guest_memcpy_us,guest_verify_ns,guest_verify_us,guest_hot_cache_ns,guest_hot_cache_us,guest_cold_cache_ns,guest_cold_cache_us,guest_second_pass_ns,guest_second_pass_us,guest_cached_verify_ns,guest_cached_verify_us,notification_est_ns,notification_est_us,total_ns,total_us,success");
+    
+    csv_logger_t *perf_csv = csv_create("latency_performance.csv",
+        "iteration,host_l1_cache_misses,host_l1_cache_references,host_l1_miss_rate,host_llc_misses,host_llc_references,host_llc_miss_rate,host_tlb_misses,host_cpu_cycles,host_instructions,host_ipc,host_cycles_per_byte,host_context_switches,guest_l1_cache_misses,guest_l1_cache_references,guest_l1_miss_rate,guest_llc_misses,guest_llc_references,guest_llc_miss_rate,guest_tlb_misses,guest_cpu_cycles,guest_instructions,guest_ipc,guest_cycles_per_byte,guest_context_switches");
     
     // Calculate available buffer size and use 4K frame for latency test
     size_t header_size = offsetof(struct shared_data, buffer);
@@ -218,6 +222,17 @@ void test_latency(volatile struct shared_data *shm, int iterations)
     
     printf("Test data ready. Starting measurements...\n\n");
     
+    // Initialize performance counters
+    struct perf_counters perf_counters;
+    bool perf_available = perf_counters_init(&perf_counters);
+    if (perf_available) {
+        printf("✓ Hardware performance counters initialized\n");
+    } else {
+        printf("⚠ Hardware performance counters not available (running without sudo or unsupported)\n");
+        printf("  Cache miss analysis will be limited\n");
+    }
+    printf("\n");
+    
     // Accumulators for statistics
     uint64_t total_memcpy = 0, total_roundtrip = 0, total_guest_copy = 0, total_verify = 0, total_notification = 0, total_total = 0;
     uint64_t min_memcpy = UINT64_MAX, max_memcpy = 0;
@@ -243,13 +258,25 @@ void test_latency(volatile struct shared_data *shm, int iterations)
         memcpy((void*)shm->data_sha256, expected_hash, 32);
         __sync_synchronize();
         
-        // MEASUREMENT 1: Host memcpy time - THIS IS THE ACTUAL WRITE OVERHEAD
+        // MEASUREMENT 1: Host memcpy time + performance counters - THIS IS THE ACTUAL WRITE OVERHEAD
+        struct perf_results host_perf_results = {0};
+        
+        // Start performance counters
+        if (perf_available) {
+            perf_counters_start(&perf_counters);
+        }
+        
         uint64_t memcpy_start = get_time_ns();
         
         memcpy((void*)data_ptr, test_frame, frame_size);
         __sync_synchronize(); // Ensure write completes before timing ends
         
         uint64_t memcpy_end = get_time_ns();
+        
+        // Stop performance counters and collect results
+        if (perf_available) {
+            perf_counters_stop(&perf_counters, &host_perf_results, frame_size);
+        }
         
         // MEASUREMENT 2: Round-trip time (from state change to guest done)
         uint64_t roundtrip_start = get_time_ns();
@@ -261,7 +288,10 @@ void test_latency(volatile struct shared_data *shm, int iterations)
         if (!wait_for_guest_state(shm, GUEST_STATE_PROCESSING, 1000000000ULL, "guest processing")) {
             printf("  [%d] TIMEOUT (guest didn't start processing)\n", i);
             if (csv && csv->file) {
-                fprintf(csv->file, "%d,0,0,0,0,0,0,0,0,0,0,0,0,0\n", i);
+                fprintf(csv->file, "%d,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0\n", i);
+            }
+            if (perf_csv && perf_csv->file) {
+                fprintf(perf_csv->file, "%d,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0\n", i);
             }
             continue;
         }
@@ -270,7 +300,10 @@ void test_latency(volatile struct shared_data *shm, int iterations)
         if (!wait_for_guest_state(shm, GUEST_STATE_ACKNOWLEDGED, 10000000000ULL, "guest acknowledged")) {
             printf("  [%d] TIMEOUT (guest didn't finish processing)\n", i);
             if (csv && csv->file) {
-                fprintf(csv->file, "%d,0,0,0,0,0,0,0,0,0,0,0,0,0\n", i);
+                fprintf(csv->file, "%d,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0\n", i);
+            }
+            if (perf_csv && perf_csv->file) {
+                fprintf(perf_csv->file, "%d,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0\n", i);
             }
             continue;
         }
@@ -281,7 +314,10 @@ void test_latency(volatile struct shared_data *shm, int iterations)
         if (shm->error_code != 0) {
             printf("  [%d] ERROR: %u\n", i, shm->error_code);
             if (csv && csv->file) {
-                fprintf(csv->file, "%d,0,0,0,0,0,0,0,0,0,0,0,0,0\n", i);
+                fprintf(csv->file, "%d,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0\n", i);
+            }
+            if (perf_csv && perf_csv->file) {
+                fprintf(perf_csv->file, "%d,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0\n", i);
             }
             continue;
         }
@@ -290,10 +326,16 @@ void test_latency(volatile struct shared_data *shm, int iterations)
         uint64_t memcpy_time = memcpy_end - memcpy_start;
         uint64_t roundtrip_time = roundtrip_end - roundtrip_start;
         
-        // Read guest-measured durations
+        // Read guest-measured durations (legacy fields for backward compatibility)
         uint64_t guest_copy_time = shm->timing.guest_copy_duration;
         uint64_t guest_verify_time = shm->timing.guest_verify_duration;
         uint64_t guest_total_time = shm->timing.guest_total_duration;
+        
+        // Read new detailed cache behavior measurements
+        uint64_t guest_hot_cache_time = shm->timing.guest_hot_cache_duration;
+        uint64_t guest_cold_cache_time = shm->timing.guest_cold_cache_duration;
+        uint64_t guest_second_pass_time = shm->timing.guest_second_pass_duration;
+        uint64_t guest_cached_verify_time = shm->timing.guest_cached_verify_duration;
         
         // Estimate notification overhead
         uint64_t notification_est = (roundtrip_time > guest_total_time) ? 
@@ -322,23 +364,50 @@ void test_latency(volatile struct shared_data *shm, int iterations)
         
         successful++;
         
-        // Write to CSV
+        // Extract guest performance metrics
+        double guest_l1_miss_rate = shm->timing.guest_perf.l1_cache_miss_rate_x10000 / 10000.0;
+        double guest_llc_miss_rate = shm->timing.guest_perf.llc_cache_miss_rate_x10000 / 10000.0;
+        double guest_ipc = shm->timing.guest_perf.instructions_per_cycle_x10000 / 10000.0;
+        double guest_cycles_per_byte = shm->timing.guest_perf.cycles_per_byte_x10000 / 10000.0;
+        
+        // Write timing data to main CSV (clean and readable)
         if (csv && csv->file) {
-            fprintf(csv->file, "%d,%lu,%.2f,%lu,%.2f,%lu,%.2f,%lu,%.2f,%lu,%.2f,%lu,%.2f,%d\n",
+            fprintf(csv->file, "%d,%lu,%.2f,%lu,%.2f,%lu,%.2f,%lu,%.2f,%lu,%.2f,%lu,%.2f,%lu,%.2f,%lu,%.2f,%lu,%.2f,%lu,%.2f,%d\n",
                     i, 
                     memcpy_time, memcpy_time / 1000.0,
                     roundtrip_time, roundtrip_time / 1000.0,
                     guest_copy_time, guest_copy_time / 1000.0,
                     guest_verify_time, guest_verify_time / 1000.0,
+                    guest_hot_cache_time, guest_hot_cache_time / 1000.0,
+                    guest_cold_cache_time, guest_cold_cache_time / 1000.0,
+                    guest_second_pass_time, guest_second_pass_time / 1000.0,
+                    guest_cached_verify_time, guest_cached_verify_time / 1000.0,
                     notification_est, notification_est / 1000.0,
                     total_time, total_time / 1000.0,
                     1);
         }
         
+        // Write performance metrics to separate CSV
+        if (perf_csv && perf_csv->file) {
+            fprintf(perf_csv->file, "%d,%lu,%lu,%.4f,%lu,%lu,%.4f,%lu,%lu,%lu,%.2f,%.2f,%lu,%lu,%lu,%.4f,%lu,%lu,%.4f,%lu,%lu,%lu,%.2f,%.2f,%lu\n",
+                    i,
+                    // Host performance metrics
+                    host_perf_results.l1_cache_misses, host_perf_results.l1_cache_references, host_perf_results.l1_cache_miss_rate,
+                    host_perf_results.llc_misses, host_perf_results.llc_references, host_perf_results.llc_cache_miss_rate,
+                    host_perf_results.tlb_misses, host_perf_results.cpu_cycles, host_perf_results.instructions,
+                    host_perf_results.instructions_per_cycle, host_perf_results.cycles_per_byte, host_perf_results.context_switches,
+                    // Guest performance metrics
+                    shm->timing.guest_perf.l1_cache_misses, shm->timing.guest_perf.l1_cache_references, guest_l1_miss_rate,
+                    shm->timing.guest_perf.llc_misses, shm->timing.guest_perf.llc_references, guest_llc_miss_rate,
+                    shm->timing.guest_perf.tlb_misses, shm->timing.guest_perf.cpu_cycles, shm->timing.guest_perf.instructions,
+                    guest_ipc, guest_cycles_per_byte, shm->timing.guest_perf.context_switches);
+        }
+        
         if (successful % 100 == 0 || iterations <= 10) {
-            printf("  [%d] Host memcpy: %.2f µs | RT: %.2f µs (notify~%.2f, guest_copy %.2f, verify %.2f) | Total: %.2f µs\n", 
-                   i, memcpy_time / 1000.0, roundtrip_time / 1000.0,
-                   notification_est / 1000.0, guest_copy_time / 1000.0, guest_verify_time / 1000.0,
+            printf("  [%d] Host: %.2f µs | Guest Phases: Hot=%.2f µs, Cold=%.2f µs, 2nd=%.2f µs, Verify=%.2f µs | Total: %.2f µs\n", 
+                   i, memcpy_time / 1000.0, 
+                   guest_hot_cache_time / 1000.0, guest_cold_cache_time / 1000.0, 
+                   guest_second_pass_time / 1000.0, guest_cached_verify_time / 1000.0,
                    total_time / 1000.0);
         }
         
@@ -394,8 +463,14 @@ void test_latency(volatile struct shared_data *shm, int iterations)
         printf("\nNo successful measurements. Is the guest program running?\n");
     }
     
+    // Cleanup
     free(test_frame);
     csv_close(csv);
+    csv_close(perf_csv);
+    
+    if (perf_available) {
+        perf_counters_cleanup(&perf_counters);
+    }
 }
 
 void test_bandwidth(volatile struct shared_data *shm, int iterations)
@@ -403,6 +478,16 @@ void test_bandwidth(volatile struct shared_data *shm, int iterations)
     printf("\n=== Bandwidth Test - Measuring Actual Memory Copy Bandwidth ===\n");
     printf("Host: memcpy to shared memory | Guest: memcpy from shared memory\n");
     printf("(Data generation and SHA256 done outside measurement)\n\n");
+    
+    // Initialize performance counters for bandwidth test
+    struct perf_counters perf_counters;
+    bool perf_available = perf_counters_init(&perf_counters);
+    if (perf_available) {
+        printf("✓ Hardware performance counters initialized for bandwidth test\n");
+    } else {
+        printf("⚠ Hardware performance counters not available for bandwidth test\n");
+    }
+    printf("\n");
     
     // Calculate available buffer size
     size_t header_size = offsetof(struct shared_data, buffer);
@@ -419,9 +504,12 @@ void test_bandwidth(volatile struct shared_data *shm, int iterations)
         {0, 0, 0, NULL}
     };
     
-    // Create CSV logger
+    // Create CSV loggers - separate files for timing and performance metrics
     csv_logger_t *csv = csv_create("bandwidth_results.csv", 
         "iteration,frame_type,width,height,bpp,size_bytes,size_mb,host_memcpy_ns,host_memcpy_ms,host_memcpy_mbps,roundtrip_ns,roundtrip_ms,guest_memcpy_ns,guest_memcpy_ms,guest_memcpy_mbps,guest_verify_ns,guest_verify_ms,total_ns,total_ms,total_mbps,success");
+    
+    csv_logger_t *perf_csv = csv_create("bandwidth_performance.csv",
+        "iteration,frame_type,host_l1_cache_misses,host_l1_cache_references,host_l1_miss_rate,host_llc_misses,host_llc_references,host_llc_miss_rate,host_tlb_misses,host_cpu_cycles,host_instructions,host_ipc,host_cycles_per_byte,host_context_switches,guest_l1_cache_misses,guest_l1_cache_references,guest_l1_miss_rate,guest_llc_misses,guest_llc_references,guest_llc_miss_rate,guest_tlb_misses,guest_cpu_cycles,guest_instructions,guest_ipc,guest_cycles_per_byte,guest_context_switches");
     
     for (int frame_idx = 0; test_frames[frame_idx].name != NULL; frame_idx++) {
         int width = test_frames[frame_idx].width;
@@ -470,11 +558,23 @@ void test_bandwidth(volatile struct shared_data *shm, int iterations)
             memcpy((void *)shm->data_sha256, expected_hash, 32);
             __sync_synchronize();
             
-            // MEASURE: Host memcpy bandwidth
+            // MEASURE: Host memcpy bandwidth + performance counters
+            struct perf_results host_perf_results = {0};
+            
+            // Start performance counters
+            if (perf_available) {
+                perf_counters_start(&perf_counters);
+            }
+            
             uint64_t memcpy_start = get_time_ns();
             memcpy((void*)data_ptr, test_frame, frame_size);
             __sync_synchronize();
             uint64_t memcpy_end = get_time_ns();
+            
+            // Stop performance counters and collect results
+            if (perf_available) {
+                perf_counters_stop(&perf_counters, &host_perf_results, frame_size);
+            }
             
             // MEASURE: Round-trip time
             uint64_t roundtrip_start = get_time_ns();
@@ -484,6 +584,10 @@ void test_bandwidth(volatile struct shared_data *shm, int iterations)
                 printf("  [%d] TIMEOUT\n", iter + 1);
                 csv_write_bandwidth_result(csv, iter + 1, test_frames[frame_idx].name,
                                          width, height, 24, frame_size, 0, 0, 0, 0, false);
+                if (perf_csv && perf_csv->file) {
+                    fprintf(perf_csv->file, "%d,%s,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0\n", 
+                            iter + 1, test_frames[frame_idx].name);
+                }
                 continue;
             }
             
@@ -491,6 +595,10 @@ void test_bandwidth(volatile struct shared_data *shm, int iterations)
                 printf("  [%d] TIMEOUT (processing)\n", iter + 1);
                 csv_write_bandwidth_result(csv, iter + 1, test_frames[frame_idx].name,
                                          width, height, 24, frame_size, 0, 0, 0, 0, false);
+                if (perf_csv && perf_csv->file) {
+                    fprintf(perf_csv->file, "%d,%s,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0\n", 
+                            iter + 1, test_frames[frame_idx].name);
+                }
                 continue;
             }
             
@@ -500,6 +608,10 @@ void test_bandwidth(volatile struct shared_data *shm, int iterations)
                 printf("  [%d] FAILED (error: %u)\n", iter + 1, shm->error_code);
                 csv_write_bandwidth_result(csv, iter + 1, test_frames[frame_idx].name,
                                          width, height, 24, frame_size, 0, 0, 0, 0, false);
+                if (perf_csv && perf_csv->file) {
+                    fprintf(perf_csv->file, "%d,%s,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0\n", 
+                            iter + 1, test_frames[frame_idx].name);
+                }
                 continue;
             }
             
@@ -508,6 +620,12 @@ void test_bandwidth(volatile struct shared_data *shm, int iterations)
             uint64_t roundtrip_time = roundtrip_end - roundtrip_start;
             uint64_t guest_memcpy_time = shm->timing.guest_copy_duration;
             uint64_t guest_verify_time = shm->timing.guest_verify_duration;
+            
+            // Read new detailed cache behavior measurements
+            uint64_t guest_hot_cache_time = shm->timing.guest_hot_cache_duration;
+            uint64_t guest_cold_cache_time = shm->timing.guest_cold_cache_duration;
+            uint64_t guest_second_pass_time = shm->timing.guest_second_pass_duration;
+            uint64_t guest_cached_verify_time = shm->timing.guest_cached_verify_duration;
             uint64_t total_time = host_memcpy_time + roundtrip_time;
             
             double size_mb = frame_size / (1024.0 * 1024.0);
@@ -523,10 +641,33 @@ void test_bandwidth(volatile struct shared_data *shm, int iterations)
             printf("  [%d] Host: %.0f MB/s | Guest: %.0f MB/s | Verify: %.1f ms | Total: %.0f MB/s\n",
                    iter + 1, host_bw, guest_bw, guest_verify_time / 1000000.0, total_bw);
             
+            // Extract guest performance metrics
+            double guest_l1_miss_rate = shm->timing.guest_perf.l1_cache_miss_rate_x10000 / 10000.0;
+            double guest_llc_miss_rate = shm->timing.guest_perf.llc_cache_miss_rate_x10000 / 10000.0;
+            double guest_ipc = shm->timing.guest_perf.instructions_per_cycle_x10000 / 10000.0;
+            double guest_cycles_per_byte = shm->timing.guest_perf.cycles_per_byte_x10000 / 10000.0;
+            
+            // Write to main bandwidth CSV
             csv_write_bandwidth_result(csv, iter + 1, test_frames[frame_idx].name,
                                      width, height, 24, frame_size, 
                                      host_memcpy_time, roundtrip_time, 
                                      guest_memcpy_time, guest_verify_time, true);
+            
+            // Write to bandwidth performance CSV
+            if (perf_csv && perf_csv->file) {
+                fprintf(perf_csv->file, "%d,%s,%lu,%lu,%.4f,%lu,%lu,%.4f,%lu,%lu,%lu,%.2f,%.2f,%lu,%lu,%lu,%.4f,%lu,%lu,%.4f,%lu,%lu,%lu,%.2f,%.2f,%lu\n",
+                        iter + 1, test_frames[frame_idx].name,
+                        // Host performance metrics
+                        host_perf_results.l1_cache_misses, host_perf_results.l1_cache_references, host_perf_results.l1_cache_miss_rate,
+                        host_perf_results.llc_misses, host_perf_results.llc_references, host_perf_results.llc_cache_miss_rate,
+                        host_perf_results.tlb_misses, host_perf_results.cpu_cycles, host_perf_results.instructions,
+                        host_perf_results.instructions_per_cycle, host_perf_results.cycles_per_byte, host_perf_results.context_switches,
+                        // Guest performance metrics
+                        shm->timing.guest_perf.l1_cache_misses, shm->timing.guest_perf.l1_cache_references, guest_l1_miss_rate,
+                        shm->timing.guest_perf.llc_misses, shm->timing.guest_perf.llc_references, guest_llc_miss_rate,
+                        shm->timing.guest_perf.tlb_misses, shm->timing.guest_perf.cpu_cycles, shm->timing.guest_perf.instructions,
+                        guest_ipc, guest_cycles_per_byte, shm->timing.guest_perf.context_switches);
+            }
             
             set_host_state(shm, HOST_STATE_READY);
             
@@ -551,6 +692,11 @@ void test_bandwidth(volatile struct shared_data *shm, int iterations)
     }
     
     csv_close(csv);
+    csv_close(perf_csv);
+    
+    if (perf_available) {
+        perf_counters_cleanup(&perf_counters);
+    }
 }
 
 void print_usage(const char *prog_name) {
