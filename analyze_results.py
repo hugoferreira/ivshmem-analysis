@@ -80,8 +80,8 @@ def plot_latency_histogram(df, output_file='latency_histogram.png'):
     """Create histogram of latency distribution"""
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
     
-    # Convert to microseconds for better readability
-    latency_us = df['latency_us']
+    # Use the new column names - roundtrip latency
+    latency_us = df['roundtrip_us']
     
     # Main histogram
     ax1.hist(latency_us, bins=50, edgecolor='black', alpha=0.7, color='skyblue')
@@ -116,26 +116,40 @@ def plot_latency_histogram(df, output_file='latency_histogram.png'):
 
 
 def plot_latency_over_time(df, output_file='latency_over_time.png'):
-    """Plot latency over time to show temporal patterns"""
-    fig, ax = plt.subplots(figsize=(14, 6))
+    """Plot latency over time to show temporal patterns with detailed breakdown"""
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 12))
     
-    ax.plot(df['iteration'], df['latency_us'], linewidth=0.5, alpha=0.6, color='steelblue')
-    ax.set_xlabel('Iteration', fontsize=12)
-    ax.set_ylabel('Latency (μs)', fontsize=12)
-    ax.set_title('ivshmem Latency Over Time', fontsize=14, fontweight='bold')
-    ax.grid(True, alpha=0.3)
+    # Overall latency over time
+    ax1.plot(df['iteration'], df['roundtrip_us'], linewidth=1, alpha=0.8, color='steelblue', label='Round-trip')
+    ax1.set_xlabel('Iteration', fontsize=12)
+    ax1.set_ylabel('Latency (μs)', fontsize=12)
+    ax1.set_title('ivshmem Latency Over Time', fontsize=14, fontweight='bold')
+    ax1.grid(True, alpha=0.3)
     
     # Add median line
-    median = df['latency_us'].median()
-    ax.axhline(y=median, color='red', linestyle='--', linewidth=2, 
+    median = df['roundtrip_us'].median()
+    ax1.axhline(y=median, color='red', linestyle='--', linewidth=2, 
                label=f'Median: {median:.2f} μs', alpha=0.7)
     
     # Add p99 line
-    p99 = df['latency_us'].quantile(0.99)
-    ax.axhline(y=p99, color='orange', linestyle='--', linewidth=2, 
+    p99 = df['roundtrip_us'].quantile(0.99)
+    ax1.axhline(y=p99, color='orange', linestyle='--', linewidth=2, 
                label=f'p99: {p99:.2f} μs', alpha=0.7)
     
-    ax.legend(loc='upper right')
+    ax1.legend(loc='upper right')
+    
+    # Detailed timing breakdown
+    ax2.plot(df['iteration'], df['write_us'], linewidth=1, alpha=0.8, label='Host Write', color='green')
+    ax2.plot(df['iteration'], df['guest_read_us'], linewidth=1, alpha=0.8, label='Guest Read', color='blue')
+    ax2.plot(df['iteration'], df['guest_verify_us'], linewidth=1, alpha=0.8, label='Guest Verify', color='red')
+    ax2.plot(df['iteration'], df['notification_est_us'], linewidth=1, alpha=0.8, label='Notification', color='purple')
+    
+    ax2.set_xlabel('Iteration', fontsize=12)
+    ax2.set_ylabel('Time (μs)', fontsize=12)
+    ax2.set_title('Latency Components Breakdown', fontsize=14, fontweight='bold')
+    ax2.grid(True, alpha=0.3)
+    ax2.legend(loc='upper right')
+    ax2.set_yscale('log')  # Log scale to see all components clearly
     
     plt.tight_layout()
     plt.savefig(output_file, dpi=150, bbox_inches='tight')
@@ -145,28 +159,48 @@ def plot_latency_over_time(df, output_file='latency_over_time.png'):
 
 
 def plot_percentile_chart(df, output_file='latency_percentiles.png'):
-    """Create a percentile chart"""
-    fig, ax = plt.subplots(figsize=(12, 8))
+    """Create a percentile chart with component breakdown"""
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 12))
     
     percentiles = np.arange(0, 101, 1)
-    latency_percentiles = [df['latency_us'].quantile(p/100) for p in percentiles]
     
-    ax.plot(percentiles, latency_percentiles, linewidth=2, color='darkblue')
-    ax.set_xlabel('Percentile', fontsize=12)
-    ax.set_ylabel('Latency (μs)', fontsize=12)
-    ax.set_title('ivshmem Latency Percentile Chart', fontsize=14, fontweight='bold')
-    ax.grid(True, alpha=0.3)
+    # Main latency percentiles
+    latency_percentiles = [df['roundtrip_us'].quantile(p/100) for p in percentiles]
+    
+    ax1.plot(percentiles, latency_percentiles, linewidth=2, color='darkblue')
+    ax1.set_xlabel('Percentile', fontsize=12)
+    ax1.set_ylabel('Latency (μs)', fontsize=12)
+    ax1.set_title('ivshmem Latency Percentile Chart', fontsize=14, fontweight='bold')
+    ax1.grid(True, alpha=0.3)
     
     # Mark important percentiles
     important_p = [50, 90, 95, 99]
     for p in important_p:
-        value = df['latency_us'].quantile(p/100)
-        ax.plot(p, value, 'ro', markersize=8)
-        ax.annotate(f'p{p}: {value:.2f} μs', 
+        value = df['roundtrip_us'].quantile(p/100)
+        ax1.plot(p, value, 'ro', markersize=8)
+        ax1.annotate(f'p{p}: {value:.2f} μs', 
                    xy=(p, value), xytext=(10, 10),
                    textcoords='offset points',
                    bbox=dict(boxstyle='round,pad=0.5', facecolor='yellow', alpha=0.7),
                    fontsize=9)
+    
+    # Component percentiles
+    write_percentiles = [df['write_us'].quantile(p/100) for p in percentiles]
+    read_percentiles = [df['guest_read_us'].quantile(p/100) for p in percentiles]
+    verify_percentiles = [df['guest_verify_us'].quantile(p/100) for p in percentiles]
+    notification_percentiles = [df['notification_est_us'].quantile(p/100) for p in percentiles]
+    
+    ax2.plot(percentiles, write_percentiles, linewidth=2, label='Host Write', color='green')
+    ax2.plot(percentiles, read_percentiles, linewidth=2, label='Guest Read', color='blue')
+    ax2.plot(percentiles, verify_percentiles, linewidth=2, label='Guest Verify', color='red')
+    ax2.plot(percentiles, notification_percentiles, linewidth=2, label='Notification', color='purple')
+    
+    ax2.set_xlabel('Percentile', fontsize=12)
+    ax2.set_ylabel('Time (μs)', fontsize=12)
+    ax2.set_title('Latency Components Percentile Chart', fontsize=14, fontweight='bold')
+    ax2.grid(True, alpha=0.3)
+    ax2.legend()
+    ax2.set_yscale('log')  # Log scale to see all components
     
     plt.tight_layout()
     plt.savefig(output_file, dpi=150, bbox_inches='tight')
@@ -181,7 +215,7 @@ def analyze_bandwidth_by_frame_type(bandwidth_df):
         return None
     
     # Filter only successful transfers
-    successful_df = bandwidth_df[bandwidth_df['data_verified'] == 1]
+    successful_df = bandwidth_df[bandwidth_df['success'] == 1]
     
     analysis = {}
     for frame_type in successful_df['frame_type'].unique():
@@ -191,21 +225,65 @@ def analyze_bandwidth_by_frame_type(bandwidth_df):
                 'count': len(frame_data),
                 'total_tests': len(bandwidth_df[bandwidth_df['frame_type'] == frame_type]),
                 'success_rate': len(frame_data) / len(bandwidth_df[bandwidth_df['frame_type'] == frame_type]) * 100,
-                'size_mb': frame_data['test_size_mb'].iloc[0],
-                'size_bytes': frame_data['test_size_bytes'].iloc[0],
-                'bandwidth_gbps': {
-                    'min': frame_data['bandwidth_gbps'].min(),
-                    'max': frame_data['bandwidth_gbps'].max(),
-                    'mean': frame_data['bandwidth_gbps'].mean(),
-                    'median': frame_data['bandwidth_gbps'].median(),
-                    'std': frame_data['bandwidth_gbps'].std(),
+                'size_mb': frame_data['size_mb'].iloc[0],
+                'size_bytes': frame_data['size_bytes'].iloc[0],
+                'total_bandwidth_gbps': {
+                    'min': frame_data['total_mbps'].min() / 1000,  # Convert to GB/s
+                    'max': frame_data['total_mbps'].max() / 1000,
+                    'mean': frame_data['total_mbps'].mean() / 1000,
+                    'median': frame_data['total_mbps'].median() / 1000,
+                    'std': frame_data['total_mbps'].std() / 1000,
                 },
-                'duration_ms': {
-                    'min': frame_data['duration_ms'].min(),
-                    'max': frame_data['duration_ms'].max(),
-                    'mean': frame_data['duration_ms'].mean(),
-                    'median': frame_data['duration_ms'].median(),
-                    'std': frame_data['duration_ms'].std(),
+                'write_bandwidth_gbps': {
+                    'min': frame_data['write_mbps'].min() / 1000,
+                    'max': frame_data['write_mbps'].max() / 1000,
+                    'mean': frame_data['write_mbps'].mean() / 1000,
+                    'median': frame_data['write_mbps'].median() / 1000,
+                    'std': frame_data['write_mbps'].std() / 1000,
+                },
+                'read_bandwidth_gbps': {
+                    'min': frame_data['read_mbps'].min() / 1000,
+                    'max': frame_data['read_mbps'].max() / 1000,
+                    'mean': frame_data['read_mbps'].mean() / 1000,
+                    'median': frame_data['read_mbps'].median() / 1000,
+                    'std': frame_data['read_mbps'].std() / 1000,
+                },
+                'timings_ms': {
+                    'write': {
+                        'min': frame_data['write_ms'].min(),
+                        'max': frame_data['write_ms'].max(),
+                        'mean': frame_data['write_ms'].mean(),
+                        'median': frame_data['write_ms'].median(),
+                        'std': frame_data['write_ms'].std(),
+                    },
+                    'roundtrip': {
+                        'min': frame_data['roundtrip_ms'].min(),
+                        'max': frame_data['roundtrip_ms'].max(),
+                        'mean': frame_data['roundtrip_ms'].mean(),
+                        'median': frame_data['roundtrip_ms'].median(),
+                        'std': frame_data['roundtrip_ms'].std(),
+                    },
+                    'guest_read': {
+                        'min': frame_data['guest_read_ms'].min(),
+                        'max': frame_data['guest_read_ms'].max(),
+                        'mean': frame_data['guest_read_ms'].mean(),
+                        'median': frame_data['guest_read_ms'].median(),
+                        'std': frame_data['guest_read_ms'].std(),
+                    },
+                    'guest_verify': {
+                        'min': frame_data['guest_verify_ms'].min(),
+                        'max': frame_data['guest_verify_ms'].max(),
+                        'mean': frame_data['guest_verify_ms'].mean(),
+                        'median': frame_data['guest_verify_ms'].median(),
+                        'std': frame_data['guest_verify_ms'].std(),
+                    },
+                    'total': {
+                        'min': frame_data['total_ms'].min(),
+                        'max': frame_data['total_ms'].max(),
+                        'mean': frame_data['total_ms'].mean(),
+                        'median': frame_data['total_ms'].median(),
+                        'std': frame_data['total_ms'].std(),
+                    }
                 }
             }
     
@@ -219,46 +297,56 @@ def plot_bandwidth_analysis(bandwidth_df, output_file='bandwidth_analysis.png'):
         return None
     
     # Filter successful transfers
-    successful_df = bandwidth_df[bandwidth_df['data_verified'] == 1]
+    successful_df = bandwidth_df[bandwidth_df['success'] == 1]
     
     fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
     
-    # 1. Bandwidth by frame type (box plot)
     frame_types = successful_df['frame_type'].unique()
-    bandwidth_data = [successful_df[successful_df['frame_type'] == ft]['bandwidth_gbps'].values 
+    
+    # 1. Total Bandwidth by frame type (box plot)
+    bandwidth_data = [successful_df[successful_df['frame_type'] == ft]['total_mbps'].values / 1000 
                      for ft in frame_types]
     
     ax1.boxplot(bandwidth_data, tick_labels=frame_types)
-    ax1.set_ylabel('Bandwidth (GB/s)', fontsize=12)
-    ax1.set_title('Bandwidth Distribution by Frame Type', fontsize=14, fontweight='bold')
+    ax1.set_ylabel('Total Bandwidth (GB/s)', fontsize=12)
+    ax1.set_title('Total Bandwidth Distribution by Frame Type', fontsize=14, fontweight='bold')
     ax1.grid(True, alpha=0.3)
     
-    # 2. Bandwidth vs Transfer Size
-    # Create consistent color mapping
-    colors = plt.cm.tab10(np.linspace(0, 1, len(frame_types)))
-    color_map = {ft: colors[i] for i, ft in enumerate(frame_types)}
+    # 2. Bandwidth Components Comparison
+    x = np.arange(len(frame_types))
+    width = 0.25
     
-    # Plot each frame type with consistent colors
-    for ft in frame_types:
-        ft_data = successful_df[successful_df['frame_type'] == ft]
-        ax2.scatter(ft_data['test_size_mb'], ft_data['bandwidth_gbps'], 
-                   c=[color_map[ft]], label=ft, alpha=0.7, s=60)
+    write_means = [successful_df[successful_df['frame_type'] == ft]['write_mbps'].mean() / 1000 for ft in frame_types]
+    read_means = [successful_df[successful_df['frame_type'] == ft]['read_mbps'].mean() / 1000 for ft in frame_types]
+    total_means = [successful_df[successful_df['frame_type'] == ft]['total_mbps'].mean() / 1000 for ft in frame_types]
     
-    ax2.set_xlabel('Transfer Size (MB)', fontsize=12)
+    ax2.bar(x - width, write_means, width, label='Write Bandwidth', alpha=0.8, color='green')
+    ax2.bar(x, read_means, width, label='Read Bandwidth', alpha=0.8, color='blue')
+    ax2.bar(x + width, total_means, width, label='Total Bandwidth', alpha=0.8, color='red')
+    
+    ax2.set_xlabel('Frame Type', fontsize=12)
     ax2.set_ylabel('Bandwidth (GB/s)', fontsize=12)
-    ax2.set_title('Bandwidth vs Transfer Size', fontsize=14, fontweight='bold')
-    ax2.grid(True, alpha=0.3)
+    ax2.set_title('Bandwidth Components by Frame Type', fontsize=14, fontweight='bold')
+    ax2.set_xticks(x)
+    ax2.set_xticklabels(frame_types)
     ax2.legend()
+    ax2.grid(True, alpha=0.3, axis='y')
     
-    # 3. Transfer Duration by Frame Type
-    duration_data = [successful_df[successful_df['frame_type'] == ft]['duration_ms'].values 
-                    for ft in frame_types]
+    # 3. Timing Components Breakdown
+    timing_components = ['write_ms', 'guest_read_ms', 'guest_verify_ms']
+    colors = ['green', 'blue', 'red']
     
-    ax3.boxplot(duration_data, tick_labels=frame_types)
-    ax3.set_ylabel('Duration (ms)', fontsize=12)
-    ax3.set_title('Transfer Duration by Frame Type', fontsize=14, fontweight='bold')
-    ax3.grid(True, alpha=0.3)
-    ax3.set_yscale('log')  # Log scale for better visibility
+    bottom = np.zeros(len(frame_types))
+    for i, component in enumerate(timing_components):
+        means = [successful_df[successful_df['frame_type'] == ft][component].mean() for ft in frame_types]
+        ax3.bar(frame_types, means, bottom=bottom, label=component.replace('_ms', '').replace('_', ' ').title(), 
+                alpha=0.8, color=colors[i])
+        bottom += means
+    
+    ax3.set_ylabel('Time (ms)', fontsize=12)
+    ax3.set_title('Timing Components Breakdown by Frame Type', fontsize=14, fontweight='bold')
+    ax3.legend()
+    ax3.grid(True, alpha=0.3, axis='y')
     
     # 4. Success Rate by Frame Type
     success_rates = []
@@ -297,8 +385,8 @@ def generate_report(latency_df, bandwidth_df, output_file='performance_report.tx
         if latency_df is not None:
             f.write("LATENCY TEST (Round-Trip)\n")
             f.write("-"*70 + "\n")
-            latency_us = latency_df['latency_us']
-            latency_ns = latency_df['latency_ns']
+            latency_us = latency_df['roundtrip_us']
+            latency_ns = latency_df['roundtrip_ns']
             
             f.write(f"Total measurements:     {len(latency_df)}\n\n")
             
@@ -326,7 +414,20 @@ def generate_report(latency_df, bandwidth_df, output_file='performance_report.tx
                 f.write(f"  p99.9:                {latency_us.quantile(0.999):>12.2f} μs\n")
             f.write(f"  Std Dev:              {latency_us.std():>12.2f} μs\n\n")
             
-            f.write("Estimated One-Way Latency (half of round-trip):\n")
+            # Add detailed component breakdown
+            f.write("Latency Components Breakdown (microseconds):\n")
+            components = {
+                'Host Write': 'write_us',
+                'Guest Read': 'guest_read_us', 
+                'Guest Verify': 'guest_verify_us',
+                'Notification (est)': 'notification_est_us'
+            }
+            
+            for name, col in components.items():
+                data = latency_df[col]
+                f.write(f"  {name:<20} {data.mean():>8.2f} μs (p95: {data.quantile(0.95):>6.2f} μs)\n")
+            
+            f.write(f"\nEstimated One-Way Latency (half of round-trip):\n")
             f.write(f"  Mean:                 {latency_ns.mean()/2:>12.0f} ns ({latency_us.mean()/2:>8.2f} μs)\n")
             f.write(f"  Median:               {latency_ns.median()/2:>12.0f} ns ({latency_us.median()/2:>8.2f} μs)\n\n")
         
@@ -342,34 +443,44 @@ def generate_report(latency_df, bandwidth_df, output_file='performance_report.tx
                 for frame_type, stats in bandwidth_analysis.items():
                     f.write(f"\n{frame_type.upper()} ({stats['size_mb']:.2f} MB):\n")
                     f.write(f"  Tests:                {stats['count']}/{stats['total_tests']} successful ({stats['success_rate']:.1f}%)\n")
-                    f.write(f"  Bandwidth (GB/s):\n")
-                    f.write(f"    Min:                {stats['bandwidth_gbps']['min']:>12.2f} GB/s\n")
-                    f.write(f"    Max:                {stats['bandwidth_gbps']['max']:>12.2f} GB/s\n")
-                    f.write(f"    Mean:               {stats['bandwidth_gbps']['mean']:>12.2f} GB/s\n")
-                    f.write(f"    Median:             {stats['bandwidth_gbps']['median']:>12.2f} GB/s\n")
-                    f.write(f"    Std Dev:            {stats['bandwidth_gbps']['std']:>12.2f} GB/s\n")
-                    f.write(f"  Duration (ms):\n")
-                    f.write(f"    Min:                {stats['duration_ms']['min']:>12.2f} ms\n")
-                    f.write(f"    Max:                {stats['duration_ms']['max']:>12.2f} ms\n")
-                    f.write(f"    Mean:               {stats['duration_ms']['mean']:>12.2f} ms\n")
-                    f.write(f"    Median:             {stats['duration_ms']['median']:>12.2f} ms\n")
-                    f.write(f"    Std Dev:            {stats['duration_ms']['std']:>12.2f} ms\n")
+                    f.write(f"  Total Bandwidth (GB/s):\n")
+                    f.write(f"    Min:                {stats['total_bandwidth_gbps']['min']:>12.2f} GB/s\n")
+                    f.write(f"    Max:                {stats['total_bandwidth_gbps']['max']:>12.2f} GB/s\n")
+                    f.write(f"    Mean:               {stats['total_bandwidth_gbps']['mean']:>12.2f} GB/s\n")
+                    f.write(f"    Median:             {stats['total_bandwidth_gbps']['median']:>12.2f} GB/s\n")
+                    f.write(f"    Std Dev:            {stats['total_bandwidth_gbps']['std']:>12.2f} GB/s\n")
+                    f.write(f"  Write Bandwidth (GB/s):\n")
+                    f.write(f"    Mean:               {stats['write_bandwidth_gbps']['mean']:>12.2f} GB/s\n")
+                    f.write(f"    Median:             {stats['write_bandwidth_gbps']['median']:>12.2f} GB/s\n")
+                    f.write(f"  Read Bandwidth (GB/s):\n")
+                    f.write(f"    Mean:               {stats['read_bandwidth_gbps']['mean']:>12.2f} GB/s\n")
+                    f.write(f"    Median:             {stats['read_bandwidth_gbps']['median']:>12.2f} GB/s\n")
+                    f.write(f"  Timing Breakdown (ms):\n")
+                    f.write(f"    Write:              {stats['timings_ms']['write']['mean']:>12.2f} ms\n")
+                    f.write(f"    Guest Read:         {stats['timings_ms']['guest_read']['mean']:>12.2f} ms\n")
+                    f.write(f"    Guest Verify:       {stats['timings_ms']['guest_verify']['mean']:>12.2f} ms\n")
+                    f.write(f"    Total:              {stats['timings_ms']['total']['mean']:>12.2f} ms\n")
                 
                 # Overall bandwidth summary
-                successful_df = bandwidth_df[bandwidth_df['data_verified'] == 1]
+                successful_df = bandwidth_df[bandwidth_df['success'] == 1]
                 f.write(f"\nOVERALL BANDWIDTH SUMMARY:\n")
                 f.write(f"  Total tests:          {len(bandwidth_df)}\n")
                 f.write(f"  Successful:           {len(successful_df)} ({len(successful_df)/len(bandwidth_df)*100:.1f}%)\n")
-                f.write(f"  Peak bandwidth:       {successful_df['bandwidth_gbps'].max():.2f} GB/s\n")
-                f.write(f"  Average bandwidth:    {successful_df['bandwidth_gbps'].mean():.2f} GB/s\n")
-                f.write(f"  Fastest transfer:     {successful_df['duration_ms'].min():.2f} ms\n")
-                f.write(f"  Slowest transfer:     {successful_df['duration_ms'].max():.2f} ms\n")
+                f.write(f"  Peak total bandwidth: {successful_df['total_mbps'].max() / 1000:.2f} GB/s\n")
+                f.write(f"  Average total bandwidth: {successful_df['total_mbps'].mean() / 1000:.2f} GB/s\n")
+                f.write(f"  Peak write bandwidth: {successful_df['write_mbps'].max() / 1000:.2f} GB/s\n")
+                f.write(f"  Peak read bandwidth:  {successful_df['read_mbps'].max() / 1000:.2f} GB/s\n")
+                f.write(f"  Fastest write:        {successful_df['write_ms'].min():.2f} ms\n")
+                f.write(f"  Fastest total transfer: {successful_df['total_ms'].min():.2f} ms\n")
+                f.write(f"  Slowest total transfer: {successful_df['total_ms'].max():.2f} ms\n")
                 
                 f.write(f"\nNOTES:\n")
                 f.write(f"  - High bandwidth values are due to CPU cache effects\n")
                 f.write(f"  - First iteration often slower due to cache warming\n")
                 f.write(f"  - Actual memory bandwidth typically ~25-50 GB/s for modern systems\n")
                 f.write(f"  - SHA256 verification ensures data integrity across all transfers\n")
+                f.write(f"  - Write/Read bandwidths are calculated based on individual operation times\n")
+                f.write(f"  - Total bandwidth includes all operations (write + read + verify)\n")
         
         f.write("\n" + "="*70 + "\n")
     
@@ -394,12 +505,32 @@ def main():
     print("LATENCY ANALYSIS")
     print("="*70)
     
-    calculate_statistics(latency_df['latency_ns'], 'Round-Trip Latency (nanoseconds)', 'ns')
-    calculate_statistics(latency_df['latency_us'], 'Round-Trip Latency (microseconds)', 'μs')
+    calculate_statistics(latency_df['roundtrip_ns'], 'Round-Trip Latency (nanoseconds)', 'ns')
+    calculate_statistics(latency_df['roundtrip_us'], 'Round-Trip Latency (microseconds)', 'μs')
+    
+    # Detailed component analysis
+    print("\n" + "-"*50)
+    print("LATENCY COMPONENTS ANALYSIS")
+    print("-"*50)
+    
+    components = {
+        'Host Write': 'write_us',
+        'Guest Read': 'guest_read_us', 
+        'Guest Verify': 'guest_verify_us',
+        'Notification (est)': 'notification_est_us'
+    }
+    
+    for name, col in components.items():
+        data = latency_df[col]
+        print(f"\n{name}:")
+        print(f"  Mean:    {data.mean():>12.2f} μs")
+        print(f"  Median:  {data.median():>12.2f} μs")
+        print(f"  p95:     {data.quantile(0.95):>12.2f} μs")
+        print(f"  p99:     {data.quantile(0.99):>12.2f} μs")
     
     print(f"\nEstimated One-Way Latency:")
-    print(f"  Mean:    {latency_df['latency_ns'].mean()/2:>12.0f} ns ({latency_df['latency_us'].mean()/2:>8.2f} μs)")
-    print(f"  Median:  {latency_df['latency_ns'].median()/2:>12.0f} ns ({latency_df['latency_us'].median()/2:>8.2f} μs)")
+    print(f"  Mean:    {latency_df['roundtrip_ns'].mean()/2:>12.0f} ns ({latency_df['roundtrip_us'].mean()/2:>8.2f} μs)")
+    print(f"  Median:  {latency_df['roundtrip_ns'].median()/2:>12.0f} ns ({latency_df['roundtrip_us'].median()/2:>8.2f} μs)")
     
     # Bandwidth analysis
     if bandwidth_df is not None and len(bandwidth_df) > 0:
@@ -412,20 +543,27 @@ def main():
             for frame_type, stats in bandwidth_analysis.items():
                 print(f"\n{frame_type.upper()} ({stats['size_mb']:.2f} MB):")
                 print(f"  Success Rate:         {stats['success_rate']:>8.1f}% ({stats['count']}/{stats['total_tests']})")
-                print(f"  Bandwidth (GB/s):     {stats['bandwidth_gbps']['mean']:>8.2f} ± {stats['bandwidth_gbps']['std']:>6.2f}")
-                print(f"    Range:              {stats['bandwidth_gbps']['min']:>8.2f} - {stats['bandwidth_gbps']['max']:>8.2f}")
-                print(f"  Duration (ms):        {stats['duration_ms']['mean']:>8.2f} ± {stats['duration_ms']['std']:>6.2f}")
-                print(f"    Range:              {stats['duration_ms']['min']:>8.2f} - {stats['duration_ms']['max']:>8.2f}")
+                print(f"  Total Bandwidth (GB/s): {stats['total_bandwidth_gbps']['mean']:>8.2f} ± {stats['total_bandwidth_gbps']['std']:>6.2f}")
+                print(f"    Range:              {stats['total_bandwidth_gbps']['min']:>8.2f} - {stats['total_bandwidth_gbps']['max']:>8.2f}")
+                print(f"  Write Bandwidth (GB/s): {stats['write_bandwidth_gbps']['mean']:>8.2f} ± {stats['write_bandwidth_gbps']['std']:>6.2f}")
+                print(f"  Read Bandwidth (GB/s):  {stats['read_bandwidth_gbps']['mean']:>8.2f} ± {stats['read_bandwidth_gbps']['std']:>6.2f}")
+                print(f"  Timing Breakdown (ms):")
+                print(f"    Write:              {stats['timings_ms']['write']['mean']:>8.2f} ± {stats['timings_ms']['write']['std']:>6.2f}")
+                print(f"    Guest Read:         {stats['timings_ms']['guest_read']['mean']:>8.2f} ± {stats['timings_ms']['guest_read']['std']:>6.2f}")
+                print(f"    Guest Verify:       {stats['timings_ms']['guest_verify']['mean']:>8.2f} ± {stats['timings_ms']['guest_verify']['std']:>6.2f}")
+                print(f"    Total:              {stats['timings_ms']['total']['mean']:>8.2f} ± {stats['timings_ms']['total']['std']:>6.2f}")
             
             # Overall summary
-            successful_df = bandwidth_df[bandwidth_df['data_verified'] == 1]
+            successful_df = bandwidth_df[bandwidth_df['success'] == 1]
             print(f"\nOVERALL BANDWIDTH SUMMARY:")
             print(f"  Total tests:          {len(bandwidth_df)}")
             print(f"  Successful:           {len(successful_df)} ({len(successful_df)/len(bandwidth_df)*100:.1f}%)")
-            print(f"  Peak bandwidth:       {successful_df['bandwidth_gbps'].max():.2f} GB/s")
-            print(f"  Average bandwidth:    {successful_df['bandwidth_gbps'].mean():.2f} GB/s")
-            print(f"  Fastest transfer:     {successful_df['duration_ms'].min():.2f} ms")
-            print(f"  Slowest transfer:     {successful_df['duration_ms'].max():.2f} ms")
+            print(f"  Peak total bandwidth: {successful_df['total_mbps'].max() / 1000:.2f} GB/s")
+            print(f"  Average total bandwidth: {successful_df['total_mbps'].mean() / 1000:.2f} GB/s")
+            print(f"  Peak write bandwidth: {successful_df['write_mbps'].max() / 1000:.2f} GB/s")
+            print(f"  Peak read bandwidth:  {successful_df['read_mbps'].max() / 1000:.2f} GB/s")
+            print(f"  Fastest write:        {successful_df['write_ms'].min():.2f} ms")
+            print(f"  Fastest total:        {successful_df['total_ms'].min():.2f} ms")
     
     # Generate plots
     print("\n" + "="*70)

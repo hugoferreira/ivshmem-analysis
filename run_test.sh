@@ -154,8 +154,8 @@ info "=== RUNNING LATENCY TEST ==="
 echo ""
 
 # Start guest reader for latency test only
-echo "Starting guest reader for latency test (100 iterations)..."
-ssh $SSH_OPTS $VM_USER 'sudo /tmp/guest_reader -l 100' > /tmp/guest_latency.log 2>&1 &
+echo "Starting guest reader for latency test (1000 iterations)..."
+ssh $SSH_OPTS $VM_USER 'sudo /tmp/guest_reader -l 1000' > /tmp/guest_latency.log 2>&1 &
 LATENCY_GUEST_PID=$!
 
 # Wait for guest to initialize
@@ -166,7 +166,7 @@ if ! kill -0 $LATENCY_GUEST_PID 2>/dev/null; then
 fi
 
 # Run latency test on host (separate invocation)
-if sudo ./host_writer -l 10; then
+if sudo ./host_writer -l 1000; then
     success "Latency test completed successfully"
 else
     warning "Latency test completed with issues"

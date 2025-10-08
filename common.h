@@ -30,6 +30,20 @@ typedef enum {
     GUEST_STATE_ACKNOWLEDGED = 4
 } guest_state_t;
 
+// Timing measurements structure for detailed overhead analysis
+// IMPORTANT: Host and guest clocks are NOT synchronized!
+// Guest measures durations and reports them; host measures its own durations.
+// Never compare absolute timestamps across host/guest boundary.
+struct timing_data {
+    // Guest-side DURATIONS (nanoseconds) - measured on guest clock
+    uint64_t guest_read_duration;    // Time to read/flush data from memory
+    uint64_t guest_verify_duration;  // Time to compute SHA256 verification
+    uint64_t guest_total_duration;   // Total processing time on guest
+    
+    // Reserved for future use
+    uint64_t reserved[5];
+};
+
 // Shared memory layout for cross-VM communication
 struct shared_data {
     // Initialization and termination control
@@ -45,6 +59,9 @@ struct shared_data {
     uint32_t data_size;       // Size of data in buffer
     uint8_t  data_sha256[32]; // SHA256 of the data buffer
     uint32_t error_code;      // Error code if processing failed
+    
+    // Timing measurements for overhead analysis
+    struct timing_data timing;
     
     // Alignment and buffer
     uint8_t  padding[0];      // Let compiler handle alignment

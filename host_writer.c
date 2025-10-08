@@ -2,6 +2,7 @@
  * host_writer.c - Host program to write to shared memory
  * 
  * This program writes data to /dev/shm/ivshmem and measures performance
+ * with detailed timing breakdown of all overheads
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -69,8 +70,6 @@ static guest_state_t get_guest_state(volatile struct shared_data *shm)
     return (guest_state_t)shm->guest_state;
 }
 
-// No helper functions needed - using POSIX IPC primitives directly
-
 // CSV result logging helper
 typedef struct {
     FILE *file;
@@ -92,20 +91,27 @@ static csv_logger_t* csv_create(const char *filename, const char *header)
     return logger;
 }
 
-
 static void csv_write_bandwidth_result(csv_logger_t *logger, int iteration, const char *frame_name,
                                      int width, int height, int bpp, size_t size_bytes,
-                                     uint64_t duration_ns, bool success)
+                                     uint64_t write_ns, uint64_t roundtrip_ns, 
+                                     uint64_t guest_read_ns, uint64_t guest_verify_ns,
+                                     bool success)
 {
     if (logger && logger->file) {
         double size_mb = size_bytes / (1024.0 * 1024.0);
-        double duration_ms = duration_ns / 1000000.0;
-        double bandwidth_mbps = success ? (size_mb / (duration_ns / 1e9)) : 0.0;
-        double bandwidth_gbps = success ? (bandwidth_mbps / 1024.0) : 0.0;
+        double write_bw = success && write_ns > 0 ? (size_mb / (write_ns / 1e9)) : 0.0;
+        double read_bw = success && guest_read_ns > 0 ? (size_mb / (guest_read_ns / 1e9)) : 0.0;
+        uint64_t total_ns = write_ns + roundtrip_ns;
+        double total_bw = success && total_ns > 0 ? (size_mb / (total_ns / 1e9)) : 0.0;
         
-        fprintf(logger->file, "%d,%s,%d,%d,%d,%zu,%.2f,%lu,%.2f,%.2f,%.2f,%d\n",
+        fprintf(logger->file, "%d,%s,%d,%d,%d,%zu,%.2f,%lu,%.2f,%.2f,%lu,%.2f,%lu,%.2f,%.2f,%lu,%.2f,%lu,%.2f,%.2f,%d\n",
                 iteration, frame_name, width, height, bpp, size_bytes, size_mb,
-                duration_ns, duration_ms, bandwidth_mbps, bandwidth_gbps, success ? 1 : 0);
+                write_ns, write_ns / 1000000.0, write_bw,
+                roundtrip_ns, roundtrip_ns / 1000000.0,
+                guest_read_ns, guest_read_ns / 1000000.0, read_bw,
+                guest_verify_ns, guest_verify_ns / 1000000.0,
+                total_ns, total_ns / 1000000.0, total_bw,
+                success ? 1 : 0);
     }
 }
 
@@ -136,7 +142,6 @@ static void generate_random_frame(uint8_t *buffer, int width, int height) {
     // Generate cryptographically random data to avoid cache-friendly patterns
     if (RAND_bytes(buffer, frame_size) != 1) {
         // Fallback to pseudo-random if OpenSSL fails
-        // Use high-resolution time + iteration counter for better seed diversity
         static int iteration_counter = 0;
         struct timespec ts;
         clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -170,11 +175,14 @@ static bool wait_for_guest_state(volatile struct shared_data *shm, guest_state_t
 
 void test_latency(volatile struct shared_data *shm, int iterations)
 {
-    printf("\n=== Latency Test (State-Based Protocol) ===\n");
-    printf("Sending %d messages with 4K frame data and measuring latency...\n", iterations);
+    printf("\n=== Latency Test with Detailed Overhead Breakdown ===\n");
+    printf("Measuring %d messages with 4K frame data...\n", iterations);
+    printf("Breakdown: Write (host) → Round-trip (notification + guest processing)\n");
+    printf("  Guest reports: Read time + Verify time separately\n\n");
     
-    // Create CSV logger with enhanced header
-    csv_logger_t *csv = csv_create("latency_results.csv", "iteration,latency_ns,latency_us,processing_ns,processing_us");
+    // Create CSV logger with detailed timing columns
+    csv_logger_t *csv = csv_create("latency_results.csv", 
+        "iteration,write_ns,write_us,roundtrip_ns,roundtrip_us,guest_read_ns,guest_read_us,guest_verify_ns,guest_verify_us,notification_est_ns,notification_est_us,total_ns,total_us,success");
     
     // Calculate available buffer size and use 4K frame for latency test
     size_t header_size = offsetof(struct shared_data, buffer);
@@ -193,87 +201,136 @@ void test_latency(volatile struct shared_data *shm, int iterations)
     printf("Using 4K frame: %dx%d, %.2f MB per message\n", 
            width, height, frame_size / (1024.0 * 1024.0));
     
-    uint64_t total_latency = 0;
-    uint64_t total_processing = 0;
+    // Accumulators for statistics
+    uint64_t total_write = 0, total_roundtrip = 0, total_read = 0, total_verify = 0, total_notification = 0, total_total = 0;
+    uint64_t min_write = UINT64_MAX, max_write = 0;
+    uint64_t min_roundtrip = UINT64_MAX, max_roundtrip = 0;
+    uint64_t min_read = UINT64_MAX, max_read = 0;
+    uint64_t min_verify = UINT64_MAX, max_verify = 0;
+    uint64_t min_notification = UINT64_MAX, max_notification = 0;
     int successful = 0;
-    uint64_t min_latency = UINT64_MAX;
-    uint64_t max_latency = 0;
     
     for (int i = 0; i < iterations; i++) {
-        // PREPARE ALL DATA FIRST - BEFORE changing state!
+        // Clear timing structure
+        memset((void *)&shm->timing, 0, sizeof(struct timing_data));
         
-        // Generate fresh random frame data for each iteration
+        // Reset error code
+        shm->error_code = 0;
+        __sync_synchronize();
+        
         uint8_t *data_ptr = (uint8_t *)&shm->buffer[0];
+        
+        // MEASUREMENT 1: Write time on HOST clock (data generation + hash calculation)
+        uint64_t write_start = get_time_ns();
+        
+        // Generate fresh random frame data
         generate_random_frame(data_ptr, width, height);
         
         // Calculate SHA256 of the data
         uint8_t expected_hash[32];
         calculate_sha256(data_ptr, frame_size, expected_hash);
         
-        // Reset error code
-        shm->error_code = 0;
-        __sync_synchronize();
+        uint64_t write_end = get_time_ns();
         
         // Prepare message headers
         shm->sequence = i;
-        shm->data_size = frame_size; // Latency test uses FULL 4K frame!
+        shm->data_size = frame_size;
         memcpy((void*)shm->data_sha256, expected_hash, 32);
         __sync_synchronize();
         
-        // NOW signal that data is ready - STATE CHANGE LAST!
+        // MEASUREMENT 2: Round-trip time on HOST clock (from state change to guest done)
+        uint64_t roundtrip_start = get_time_ns();
+        
         // STATE: HOST_STATE_READY -> HOST_STATE_SENDING
         set_host_state(shm, HOST_STATE_SENDING);
-        
-        // Start timer
-        uint64_t start_time = get_time_ns();
         
         // Wait for guest to start processing (GUEST_STATE_PROCESSING)
         if (!wait_for_guest_state(shm, GUEST_STATE_PROCESSING, 1000000000ULL, "guest processing")) {
             printf("  [%d] TIMEOUT (guest didn't start processing)\n", i);
+            if (csv && csv->file) {
+                fprintf(csv->file, "%d,0,0,0,0,0,0,0,0,0,0,0,0,0\n", i);
+            }
             continue;
         }
         
-        // Stop latency timer - this measures true latency (time to start processing)
-        uint64_t latency_end_time = get_time_ns();
-        
         // Wait for guest to finish processing (GUEST_STATE_ACKNOWLEDGED)
-        if (!wait_for_guest_state(shm, GUEST_STATE_ACKNOWLEDGED, 1000000000ULL, "guest acknowledged")) {
+        if (!wait_for_guest_state(shm, GUEST_STATE_ACKNOWLEDGED, 10000000000ULL, "guest acknowledged")) {
             printf("  [%d] TIMEOUT (guest didn't finish processing)\n", i);
-            // Still count the latency measurement since guest started processing
+            if (csv && csv->file) {
+                fprintf(csv->file, "%d,0,0,0,0,0,0,0,0,0,0,0,0,0\n", i);
+            }
+            continue;
         }
         
-        uint64_t processing_end_time = get_time_ns();
+        uint64_t roundtrip_end = get_time_ns();
         
         // Check for errors
         if (shm->error_code != 0) {
             printf("  [%d] ERROR: %u\n", i, shm->error_code);
+            if (csv && csv->file) {
+                fprintf(csv->file, "%d,0,0,0,0,0,0,0,0,0,0,0,0,0\n", i);
+            }
             continue;
         }
         
-        // Record successful measurement
-        uint64_t latency = latency_end_time - start_time;
-        uint64_t processing_time = processing_end_time - start_time;
+        // Calculate times (all on HOST clock except guest durations)
+        uint64_t write_time = write_end - write_start;
+        uint64_t roundtrip_time = roundtrip_end - roundtrip_start;
         
-        // Write to CSV with both latency and processing time
-        if (csv && csv->file) {
-            fprintf(csv->file, "%d,%lu,%.2f,%lu,%.2f\n", 
-                   successful, latency, latency / 1000.0, 
-                   processing_time, processing_time / 1000.0);
-        }
+        // Read guest-measured durations (measured on GUEST clock - these are durations, not timestamps)
+        uint64_t guest_read_time = shm->timing.guest_read_duration;
+        uint64_t guest_verify_time = shm->timing.guest_verify_duration;
+        uint64_t guest_total_time = shm->timing.guest_total_duration;
         
-        total_latency += latency;
-        total_processing += processing_time;
+        // Estimate notification time = roundtrip - guest_total
+        // This is the "overhead" of notification and state machine coordination
+        uint64_t notification_est = (roundtrip_time > guest_total_time) ? 
+                                    (roundtrip_time - guest_total_time) : 0;
+        
+        uint64_t total_time = write_time + roundtrip_time;
+        
+        // Update statistics
+        total_write += write_time;
+        total_roundtrip += roundtrip_time;
+        total_read += guest_read_time;
+        total_verify += guest_verify_time;
+        total_notification += notification_est;
+        total_total += total_time;
+        
+        if (write_time < min_write) min_write = write_time;
+        if (write_time > max_write) max_write = write_time;
+        if (roundtrip_time < min_roundtrip) min_roundtrip = roundtrip_time;
+        if (roundtrip_time > max_roundtrip) max_roundtrip = roundtrip_time;
+        if (guest_read_time < min_read) min_read = guest_read_time;
+        if (guest_read_time > max_read) max_read = guest_read_time;
+        if (guest_verify_time < min_verify) min_verify = guest_verify_time;
+        if (guest_verify_time > max_verify) max_verify = guest_verify_time;
+        if (notification_est < min_notification) min_notification = notification_est;
+        if (notification_est > max_notification) max_notification = notification_est;
+        
         successful++;
         
-        if (latency < min_latency) min_latency = latency;
-        if (latency > max_latency) max_latency = latency;
-        
-        if (successful % 100 == 0 || iterations <= 10) {
-            printf("  [%d] Latency: %lu ns (%.2f µs), Processing: %lu ns (%.2f µs)\n", 
-                   i, latency, latency / 1000.0, processing_time, processing_time / 1000.0);
+        // Write to CSV
+        if (csv && csv->file) {
+            fprintf(csv->file, "%d,%lu,%.2f,%lu,%.2f,%lu,%.2f,%lu,%.2f,%lu,%.2f,%lu,%.2f,%d\n",
+                    i, 
+                    write_time, write_time / 1000.0,
+                    roundtrip_time, roundtrip_time / 1000.0,
+                    guest_read_time, guest_read_time / 1000.0,
+                    guest_verify_time, guest_verify_time / 1000.0,
+                    notification_est, notification_est / 1000.0,
+                    total_time, total_time / 1000.0,
+                    1);
         }
         
-        // STATE: HOST_STATE_SENDING -> HOST_STATE_READY (ready for next message)
+        if (successful % 100 == 0 || iterations <= 10) {
+            printf("  [%d] Write: %.2f µs | RT: %.2f µs (notify~%.2f, read %.2f, verify %.2f) | Total: %.2f µs\n", 
+                   i, write_time / 1000.0, roundtrip_time / 1000.0,
+                   notification_est / 1000.0, guest_read_time / 1000.0, guest_verify_time / 1000.0,
+                   total_time / 1000.0);
+        }
+        
+        // STATE: HOST_STATE_SENDING -> HOST_STATE_READY
         set_host_state(shm, HOST_STATE_READY);
         
         // Wait for guest to be ready for next message
@@ -283,21 +340,41 @@ void test_latency(volatile struct shared_data *shm, int iterations)
     }
     
     if (successful > 0) {
-        printf("\nResults:\n");
-        printf("  Successful: %d/%d\n", successful, iterations);
-        printf("  Frame size: %.2f MB (4K frame)\n", frame_size / (1024.0 * 1024.0));
-        printf("  Average latency (receive): %lu ns (%.2f µs)\n", 
-               total_latency / successful, 
-               (total_latency / successful) / 1000.0);
-        printf("  Average processing time: %lu ns (%.2f µs)\n", 
-               total_processing / successful, 
-               (total_processing / successful) / 1000.0);
-        printf("  Min latency: %lu ns (%.2f µs)\n", 
-               min_latency, min_latency / 1000.0);
-        printf("  Max latency: %lu ns (%.2f µs)\n", 
-               max_latency, max_latency / 1000.0);
+        printf("\n=== Latency Test Results ===\n");
+        printf("Successful: %d/%d\n", successful, iterations);
+        printf("Frame size: %.2f MB (4K frame)\n\n", frame_size / (1024.0 * 1024.0));
         
-        printf("\n  ✓ Data exported to latency_results.csv\n");
+        printf("OVERHEAD BREAKDOWN (Average):\n");
+        printf("  Write (host):         %7lu ns (%7.2f µs) [%6.1f%%]\n", 
+               total_write / successful, (total_write / successful) / 1000.0,
+               100.0 * total_write / total_total);
+        printf("  Notification (est):   %7lu ns (%7.2f µs) [%6.1f%%]\n", 
+               total_notification / successful, (total_notification / successful) / 1000.0,
+               100.0 * total_notification / total_total);
+        printf("  Read (guest):         %7lu ns (%7.2f µs) [%6.1f%%]\n", 
+               total_read / successful, (total_read / successful) / 1000.0,
+               100.0 * total_read / total_total);
+        printf("  Verify (guest):       %7lu ns (%7.2f µs) [%6.1f%%]\n", 
+               total_verify / successful, (total_verify / successful) / 1000.0,
+               100.0 * total_verify / total_total);
+        printf("  ─────────────────────────────────────────────\n");
+        printf("  Total end-to-end:     %7lu ns (%7.2f µs) [100.0%%]\n\n", 
+               total_total / successful, (total_total / successful) / 1000.0);
+        
+        printf("MIN/MAX:\n");
+        printf("  Write:        %lu - %lu ns (%.2f - %.2f µs)\n", 
+               min_write, max_write, min_write / 1000.0, max_write / 1000.0);
+        printf("  Round-trip:   %lu - %lu ns (%.2f - %.2f µs)\n", 
+               min_roundtrip, max_roundtrip, min_roundtrip / 1000.0, max_roundtrip / 1000.0);
+        printf("  Notification: %lu - %lu ns (%.2f - %.2f µs)\n", 
+               min_notification, max_notification, min_notification / 1000.0, max_notification / 1000.0);
+        printf("  Read:         %lu - %lu ns (%.2f - %.2f µs)\n", 
+               min_read, max_read, min_read / 1000.0, max_read / 1000.0);
+        printf("  Verify:       %lu - %lu ns (%.2f - %.2f µs)\n", 
+               min_verify, max_verify, min_verify / 1000.0, max_verify / 1000.0);
+        
+        printf("\nNote: Notification time is estimated as (round-trip - guest_total)\n");
+        printf("      Includes polling delay and state machine overhead\n");
     } else {
         printf("\nNo successful measurements. Is the guest program running?\n");
     }
@@ -307,9 +384,9 @@ void test_latency(volatile struct shared_data *shm, int iterations)
 
 void test_bandwidth(volatile struct shared_data *shm, int iterations)
 {
-    printf("\n=== Bandwidth Test ===\n");
-    printf("Testing transmission times with fresh random data per iteration...\n");
-    printf("Guest will handle cache flushing to ensure real memory reads.\n");
+    printf("\n=== Bandwidth Test with Overhead Breakdown ===\n");
+    printf("Testing memory write/read bandwidth with fresh random data...\n");
+    printf("Breakdown: Write BW (host) | Read BW (guest) | Verify Time (guest)\n\n");
     
     // Calculate available buffer size
     size_t header_size = offsetof(struct shared_data, buffer);
@@ -320,15 +397,15 @@ void test_bandwidth(volatile struct shared_data *shm, int iterations)
         int width, height, bpp;
         const char *name;
     } test_frames[] = {
-        {1920, 1080, 3, "1080p"},  // 24bpp = 3 bytes per pixel
-        {2560, 1440, 3, "1440p"},  // 24bpp = 3 bytes per pixel
-        {3840, 2160, 3, "4K"},     // 24bpp = 3 bytes per pixel
-        {0, 0, 0, NULL} // Sentinel
+        {1920, 1080, 3, "1080p"},
+        {2560, 1440, 3, "1440p"},
+        {3840, 2160, 3, "4K"},
+        {0, 0, 0, NULL}
     };
     
     // Create CSV logger
     csv_logger_t *csv = csv_create("bandwidth_results.csv", 
-        "iteration,frame_type,width,height,bpp,test_size_bytes,test_size_mb,duration_ns,duration_ms,bandwidth_mbps,bandwidth_gbps,data_verified");
+        "iteration,frame_type,width,height,bpp,size_bytes,size_mb,write_ns,write_ms,write_mbps,roundtrip_ns,roundtrip_ms,guest_read_ns,guest_read_ms,read_mbps,guest_verify_ns,guest_verify_ms,total_ns,total_ms,total_mbps,success");
     
     for (int frame_idx = 0; test_frames[frame_idx].name != NULL; frame_idx++) {
         int width = test_frames[frame_idx].width;
@@ -337,114 +414,108 @@ void test_bandwidth(volatile struct shared_data *shm, int iterations)
         size_t frame_size = width * height * bpp;
         
         if (frame_size > max_data_size) {
-            printf("Skipping %s (%dx%d): frame too large (%zu bytes > %zu bytes)\n", 
-                   test_frames[frame_idx].name, width, height, frame_size, max_data_size);
+            printf("Skipping %s (%dx%d): frame too large\n", 
+                   test_frames[frame_idx].name, width, height);
             continue;
         }
         
         printf("\n--- Testing %s (%dx%d, %.2f MB) ---\n", 
                test_frames[frame_idx].name, width, height, frame_size / (1024.0 * 1024.0));
         
-        double total_bandwidth = 0.0;
-        int successful_tests = 0;
+        double total_write_bw = 0.0, total_read_bw = 0.0, total_overall_bw = 0.0;
+        int successful = 0;
         
         for (int iter = 0; iter < iterations; iter++) {
-            // Small delay between iterations
-            if (iter > 0) {
-                usleep(10000); // 10ms delay
-            }
+            if (iter > 0) usleep(10000);
             
-            // PREPARE ALL DATA FIRST - BEFORE timing starts
-            
-            // Generate fresh random data for each iteration
-            uint8_t *data_ptr = (uint8_t *)&shm->buffer[0];
-            generate_random_frame(data_ptr, width, height);
-            
-            // Calculate SHA256 of the data
-            uint8_t expected_hash[32];
-            calculate_sha256(data_ptr, frame_size, expected_hash);
-            
-            // Reset error code
+            // Clear timing
+            memset((void *)&shm->timing, 0, sizeof(struct timing_data));
             shm->error_code = 0;
             __sync_synchronize();
             
-            // Prepare header
-            shm->sequence = 0xFFFF + iter;  // Unique sequence for each bandwidth test
+            uint8_t *data_ptr = (uint8_t *)&shm->buffer[0];
+            
+            // MEASURE: Write bandwidth on HOST clock
+            uint64_t write_start = get_time_ns();
+            generate_random_frame(data_ptr, width, height);
+            uint8_t expected_hash[32];
+            calculate_sha256(data_ptr, frame_size, expected_hash);
+            uint64_t write_end = get_time_ns();
+            
+            shm->sequence = 0xFFFF + iter;
             shm->data_size = frame_size;
             memcpy((void *)shm->data_sha256, expected_hash, 32);
             __sync_synchronize();
             
-            // START TIMER - measuring transmission time only
-            uint64_t start_time = get_time_ns();
-            
-            // NOW signal that data is ready - STATE CHANGE starts transmission
-            // STATE: HOST_STATE_READY -> HOST_STATE_SENDING
+            // MEASURE: Round-trip time on HOST clock
+            uint64_t roundtrip_start = get_time_ns();
             set_host_state(shm, HOST_STATE_SENDING);
             
-            printf("  [%d] Starting transfer...", iter + 1);
-            fflush(stdout);
-            
-            // Wait for guest to start processing
             if (!wait_for_guest_state(shm, GUEST_STATE_PROCESSING, 2000000000ULL, "guest processing")) {
-                printf(" TIMEOUT (guest didn't start processing)\n");
-                csv_write_bandwidth_result(csv, iter + 1, test_frames[frame_idx].name, 
-                                         width, height, 24, frame_size, 0, false);
+                printf("  [%d] TIMEOUT\n", iter + 1);
+                csv_write_bandwidth_result(csv, iter + 1, test_frames[frame_idx].name,
+                                         width, height, 24, frame_size, 0, 0, 0, 0, false);
                 continue;
             }
             
-            printf(" received, processing...");
-            fflush(stdout);
-            
-            // Wait for guest to finish processing
             if (!wait_for_guest_state(shm, GUEST_STATE_ACKNOWLEDGED, 10000000000ULL, "guest acknowledged")) {
-                printf(" TIMEOUT (processing not finished)\n");
-                csv_write_bandwidth_result(csv, iter + 1, test_frames[frame_idx].name, 
-                                         width, height, 24, frame_size, 0, false);
+                printf("  [%d] TIMEOUT (processing)\n", iter + 1);
+                csv_write_bandwidth_result(csv, iter + 1, test_frames[frame_idx].name,
+                                         width, height, 24, frame_size, 0, 0, 0, 0, false);
                 continue;
             }
             
-            uint64_t end_time = get_time_ns();
+            uint64_t roundtrip_end = get_time_ns();
             
-            // Process results
-            uint64_t duration_ns = end_time - start_time;
-            
-            // Check for errors
-            bool success = (shm->error_code == 0);
-            
-            if (success) {
-                double duration_s = duration_ns / 1e9;
-                double bandwidth_mbps = (frame_size / (1024.0 * 1024.0)) / duration_s;
-                double bandwidth_gbps = bandwidth_mbps / 1024.0;
-                
-                total_bandwidth += bandwidth_gbps;
-                successful_tests++;
-                
-                printf(" %.2f GB/s (%.2f ms)\n", bandwidth_gbps, duration_ns / 1000000.0);
-            } else {
-                printf(" FAILED (guest reported error: %u)\n", shm->error_code);
+            if (shm->error_code != 0) {
+                printf("  [%d] FAILED (error: %u)\n", iter + 1, shm->error_code);
+                csv_write_bandwidth_result(csv, iter + 1, test_frames[frame_idx].name,
+                                         width, height, 24, frame_size, 0, 0, 0, 0, false);
+                continue;
             }
             
-            // Log result to CSV
-            csv_write_bandwidth_result(csv, iter + 1, test_frames[frame_idx].name, 
-                                     width, height, 24, frame_size, duration_ns, success);
+            // Calculate times and bandwidths
+            uint64_t write_time = write_end - write_start;
+            uint64_t roundtrip_time = roundtrip_end - roundtrip_start;
+            uint64_t guest_read_time = shm->timing.guest_read_duration;
+            uint64_t guest_verify_time = shm->timing.guest_verify_duration;
+            uint64_t total_time = write_time + roundtrip_time;
             
-            // STATE: HOST_STATE_SENDING -> HOST_STATE_READY
+            double size_mb = frame_size / (1024.0 * 1024.0);
+            double write_bw = size_mb / (write_time / 1e9);
+            double read_bw = size_mb / (guest_read_time / 1e9);
+            double total_bw = size_mb / (total_time / 1e9);
+            
+            total_write_bw += write_bw;
+            total_read_bw += read_bw;
+            total_overall_bw += total_bw;
+            successful++;
+            
+            printf("  [%d] Write: %.0f MB/s | Read: %.0f MB/s | Verify: %.1f ms | Total: %.0f MB/s\n",
+                   iter + 1, write_bw, read_bw, guest_verify_time / 1000000.0, total_bw);
+            
+            csv_write_bandwidth_result(csv, iter + 1, test_frames[frame_idx].name,
+                                     width, height, 24, frame_size, 
+                                     write_time, roundtrip_time, 
+                                     guest_read_time, guest_verify_time, true);
+            
             set_host_state(shm, HOST_STATE_READY);
             
-            // Wait for guest to be ready for next message
-            if (!wait_for_guest_state(shm, GUEST_STATE_READY, 1000000000ULL, "guest ready for next")) {
-                printf("  WARNING: Guest didn't return to ready state\n");
+            if (!wait_for_guest_state(shm, GUEST_STATE_READY, 1000000000ULL, "guest ready")) {
+                printf("  WARNING: Guest didn't return to ready\n");
             }
             
-            // Small delay between iterations
-            usleep(100000); // 100ms
+            usleep(100000);
         }
         
-        if (successful_tests > 0) {
-            printf("  Average bandwidth: %.2f GB/s (%d/%d successful)\n", 
-                   total_bandwidth / successful_tests, successful_tests, iterations);
-        } else {
-            printf("  No successful transfers for %s\n", test_frames[frame_idx].name);
+        if (successful > 0) {
+            printf("\n  %s Results (%d/%d successful):\n", test_frames[frame_idx].name, successful, iterations);
+            printf("    Avg Write BW:   %.0f MB/s (%.2f GB/s)\n", 
+                   total_write_bw / successful, (total_write_bw / successful) / 1024.0);
+            printf("    Avg Read BW:    %.0f MB/s (%.2f GB/s)\n", 
+                   total_read_bw / successful, (total_read_bw / successful) / 1024.0);
+            printf("    Avg Overall BW: %.0f MB/s (%.2f GB/s)\n", 
+                   total_overall_bw / successful, (total_overall_bw / successful) / 1024.0);
         }
     }
     
@@ -465,46 +536,39 @@ void print_usage(const char *prog_name) {
     printf("  %s -l -b                 Run both tests with defaults\n", prog_name);
 }
 
-// Initialize shared memory with graceful startup handling
 void init_shared_memory(volatile struct shared_data *shm) {
     printf("HOST: Starting initialization...\n");
     
-    // Check if guest started first and left stale data
     guest_state_t guest_state = get_guest_state(shm);
     if (guest_state != GUEST_STATE_UNINITIALIZED) {
-        printf("HOST: Detected guest started first (guest state: %s), clearing stale data...\n", 
+        printf("HOST: Detected guest started first (state: %s), clearing...\n", 
                guest_state_name(guest_state));
     }
     
-    // STATE: HOST_STATE_INITIALIZING
-    // CRITICAL: Clear magic first to signal "initializing"
     shm->magic = 0;
     set_host_state(shm, HOST_STATE_INITIALIZING);
     __sync_synchronize();
     
-    // Initialize all fields to known clean state (but don't touch guest_state - that's guest's job)
     shm->sequence = 0;
     shm->data_size = 0;
     shm->error_code = 0;
     shm->test_complete = 0;
     memset((void*)shm->data_sha256, 0, 32);
+    memset((void*)&shm->timing, 0, sizeof(struct timing_data));
     __sync_synchronize();
     
-    // CRITICAL: Set magic LAST to signal "initialization complete"
-    // STATE: HOST_STATE_READY
     shm->magic = MAGIC;
     set_host_state(shm, HOST_STATE_READY);
     __sync_synchronize();
     
-    printf("HOST: Initialization complete - waiting for guest to be ready...\n");
+    printf("HOST: Initialization complete - waiting for guest...\n");
     
-    // Wait for guest to be ready (with timeout)
     if (!wait_for_guest_state(shm, GUEST_STATE_READY, 10000000000ULL, "guest ready")) {
-        printf("HOST: WARNING - Guest didn't reach ready state within 10 seconds\n");
+        printf("HOST: WARNING - Guest not ready within 10 seconds\n");
         printf("HOST: Current guest state: %s\n", guest_state_name(get_guest_state(shm)));
         printf("HOST: Proceeding anyway...\n");
     } else {
-        printf("HOST: ✓ Guest is ready - synchronization complete\n");
+        printf("HOST: ✓ Guest ready - synchronization complete\n");
     }
 }
 
@@ -515,18 +579,15 @@ int main(int argc, char *argv[])
     int latency_count = 100;
     int bandwidth_count = 10;
     
-    // Parse command line arguments
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-l") == 0 || strcmp(argv[i], "--latency") == 0) {
             run_latency = true;
-            // Check if next argument is a number
             if (i + 1 < argc && argv[i + 1][0] != '-') {
                 latency_count = atoi(argv[++i]);
                 if (latency_count <= 0) latency_count = 1;
             }
         } else if (strcmp(argv[i], "-b") == 0 || strcmp(argv[i], "--bandwidth") == 0) {
             run_bandwidth = true;
-            // Check if next argument is a number
             if (i + 1 < argc && argv[i + 1][0] != '-') {
                 bandwidth_count = atoi(argv[++i]);
                 if (bandwidth_count <= 0) bandwidth_count = 1;
@@ -549,16 +610,14 @@ int main(int argc, char *argv[])
         }
     }
     
-    // If no tests specified, run both
     if (!run_latency && !run_bandwidth) {
         run_latency = true;
         run_bandwidth = true;
     }
     
-    printf("Host Writer - ivshmem Performance Test\n");
-    printf("=======================================\n\n");
+    printf("Host Writer - ivshmem Performance Test with Overhead Analysis\n");
+    printf("=============================================================\n\n");
     
-    // Open shared memory
     int fd = open(SHMEM_PATH, O_RDWR);
     if (fd < 0) {
         perror("Failed to open shared memory");
@@ -566,7 +625,6 @@ int main(int argc, char *argv[])
         return 1;
     }
     
-    // Get file size
     struct stat st;
     if (fstat(fd, &st) < 0) {
         perror("fstat");
@@ -576,9 +634,7 @@ int main(int argc, char *argv[])
     
     printf("Shared memory: %s (%ld bytes)\n", SHMEM_PATH, st.st_size);
     
-    // Map shared memory
-    void *ptr = mmap(NULL, st.st_size, PROT_READ | PROT_WRITE, 
-                     MAP_SHARED, fd, 0);
+    void *ptr = mmap(NULL, st.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (ptr == MAP_FAILED) {
         perror("mmap");
         close(fd);
@@ -591,18 +647,13 @@ int main(int argc, char *argv[])
     printf("Data buffer size: %zu bytes\n", 
            st.st_size - offsetof(struct shared_data, buffer));
     
-    // Initialize shared memory with custom polling protocol IMMEDIATELY
     printf("\nInitializing shared memory protocol...\n");
     init_shared_memory(shm);
-    printf("Shared memory initialization complete.\n");
-    printf("Guest programs can now start safely.\n");
     
-    // Wait for user
     printf("\nMake sure the guest program is running!\n");
     printf("Press Enter to start tests...\n");
     getchar();
     
-    // Run tests
     if (run_latency) {
         test_latency(shm, latency_count);
     }
@@ -615,14 +666,13 @@ int main(int argc, char *argv[])
         test_bandwidth(shm, bandwidth_count);
     }
     
-    // Signal test completion
     set_host_state(shm, HOST_STATE_COMPLETED);
     shm->test_complete = 1;
-    __sync_synchronize(); // Ensure completion flag is visible
+    __sync_synchronize();
+    
     munmap(ptr, st.st_size);
     close(fd);
     
     printf("\nTests completed.\n");
     return 0;
 }
-
